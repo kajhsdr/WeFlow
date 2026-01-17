@@ -15,7 +15,7 @@ export class MessageCacheService {
   constructor(cacheBasePath?: string) {
     const basePath = cacheBasePath && cacheBasePath.trim().length > 0
       ? cacheBasePath
-      : join(app.getPath('userData'), 'WeFlowCache')
+      : join(app.getPath('documents'), 'WeFlow')
     this.cacheFilePath = join(basePath, 'session-messages.json')
     this.ensureCacheDir()
     this.loadCache()

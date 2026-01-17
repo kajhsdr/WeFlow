@@ -439,12 +439,14 @@ function registerIpcHandlers() {
     return chatService.getImageData(sessionId, msgId)
   })
 
-  ipcMain.handle('chat:getVoiceData', async (_, sessionId: string, msgId: string) => {
-    return chatService.getVoiceData(sessionId, msgId)
+  ipcMain.handle('chat:getVoiceData', async (_, sessionId: string, msgId: string, createTime?: number, serverId?: string | number) => {
+    return chatService.getVoiceData(sessionId, msgId, createTime, serverId)
   })
 
-  ipcMain.handle('chat:getVoiceTranscript', async (_, sessionId: string, msgId: string) => {
-    return chatService.getVoiceTranscript(sessionId, msgId)
+  ipcMain.handle('chat:getVoiceTranscript', async (event, sessionId: string, msgId: string) => {
+    return chatService.getVoiceTranscript(sessionId, msgId, (text) => {
+      event.sender.send('chat:voiceTranscriptPartial', { msgId, text })
+    })
   })
 
   ipcMain.handle('chat:getMessageById', async (_, sessionId: string, localId: number) => {
@@ -521,14 +523,14 @@ function registerIpcHandlers() {
     return { success: true }
   })
 
-  ipcMain.handle('whisper:downloadModel', async (event, payload: { modelName: string; downloadDir?: string; source?: string }) => {
-    return voiceTranscribeService.downloadModel(payload, (progress) => {
+  ipcMain.handle('whisper:downloadModel', async (event) => {
+    return voiceTranscribeService.downloadModel((progress) => {
       event.sender.send('whisper:downloadProgress', progress)
     })
   })
 
-  ipcMain.handle('whisper:getModelStatus', async (_, payload: { modelName: string; downloadDir?: string }) => {
-    return voiceTranscribeService.getModelStatus(payload)
+  ipcMain.handle('whisper:getModelStatus', async () => {
+    return voiceTranscribeService.getModelStatus()
   })
 
   // 群聊分析相关

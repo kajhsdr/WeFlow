@@ -1882,3 +1882,31 @@
     transform: translateX(0);
   }
 }
+/* 语音转文字按钮样式 */
+.voice-transcribe-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  margin-left: 8px;
+  border: none;
+  background: var(--primary-light);
+  border-radius: 50%;
+  color: var(--primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+
+  &:hover {
+    background: var(--primary);
+    color: #fff;
+    transform: scale(1.05);
+  }
+
+  svg {
+    width: 14px;
+    height: 14px;
+  }
+}

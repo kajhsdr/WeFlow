@@ -90,6 +90,23 @@ export default defineConfig({
         }
       },
       {
+        entry: 'electron/transcribeWorker.ts',
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: [
+                'sherpa-onnx-node'
+              ],
+              output: {
+                entryFileNames: 'transcribeWorker.js',
+                inlineDynamicImports: true
+              }
+            }
+          }
+        }
+      },
+      {
         entry: 'electron/preload.ts',
         onstart(options) {
           options.reload()

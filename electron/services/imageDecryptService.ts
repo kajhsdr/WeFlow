@@ -14,17 +14,17 @@ function getStaticFfmpegPath(): string | null {
     // 方法1: 直接 require ffmpeg-static
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const ffmpegStatic = require('ffmpeg-static')
-    
+
     if (typeof ffmpegStatic === 'string' && existsSync(ffmpegStatic)) {
       return ffmpegStatic
     }
-    
+
     // 方法2: 手动构建路径（开发环境）
     const devPath = join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe')
     if (existsSync(devPath)) {
       return devPath
     }
-    
+
     // 方法3: 打包后的路径
     if (app.isPackaged) {
       const resourcesPath = process.resourcesPath
@@ -33,7 +33,7 @@ function getStaticFfmpegPath(): string | null {
         return packedPath
       }
     }
-    
+
     return null
   } catch {
     return null
@@ -115,7 +115,6 @@ export class ImageDecryptService {
     for (const key of cacheKeys) {
       const cached = this.resolvedCache.get(key)
       if (cached && existsSync(cached) && this.isImageFile(cached)) {
-        this.logInfo('缓存命中(从Map)', { key, path: cached, isThumb: this.isThumbnailPath(cached) })
         const dataUrl = this.fileToDataUrl(cached)
         const isThumb = this.isThumbnailPath(cached)
         const hasUpdate = isThumb ? (this.updateFlags.get(key) ?? false) : false
@@ -135,7 +134,6 @@ export class ImageDecryptService {
     for (const key of cacheKeys) {
       const existing = this.findCachedOutput(key, false, payload.sessionId)
       if (existing) {
-        this.logInfo('缓存命中(文件系统)', { key, path: existing, isThumb: this.isThumbnailPath(existing) })
         this.cacheResolvedPaths(key, payload.imageMd5, payload.imageDatName, existing)
         const dataUrl = this.fileToDataUrl(existing)
         const isThumb = this.isThumbnailPath(existing)
@@ -277,12 +275,12 @@ export class ImageDecryptService {
       decrypted = wxgfResult.data
 
       let ext = this.detectImageExtension(decrypted)
-      
+
       // 如果是 wxgf 格式且没检测到扩展名
       if (wxgfResult.isWxgf && !ext) {
         ext = '.hevc'
       }
-      
+
       const finalExt = ext || '.jpg'
 
       const outputPath = this.getCacheOutputPathFromDat(datPath, finalExt, payload.sessionId)
@@ -291,8 +289,8 @@ export class ImageDecryptService {
 
       // 对于 hevc 格式，返回错误提示
       if (finalExt === '.hevc') {
-        return { 
-          success: false, 
+        return {
+          success: false,
           error: '此图片为微信新格式(wxgf)，需要安装 ffmpeg 才能显示',
           isThumb: this.isThumbnailPath(datPath)
         }
@@ -1475,29 +1473,29 @@ export class ImageDecryptService {
    */
   private async unwrapWxgf(buffer: Buffer): Promise<{ data: Buffer; isWxgf: boolean }> {
     // 检查是否是 wxgf 格式 (77 78 67 66 = "wxgf")
-    if (buffer.length < 20 || 
-        buffer[0] !== 0x77 || buffer[1] !== 0x78 || 
-        buffer[2] !== 0x67 || buffer[3] !== 0x66) {
+    if (buffer.length < 20 ||
+      buffer[0] !== 0x77 || buffer[1] !== 0x78 ||
+      buffer[2] !== 0x67 || buffer[3] !== 0x66) {
       return { data: buffer, isWxgf: false }
     }
-    
+
     // 先尝试搜索内嵌的传统图片签名
     for (let i = 4; i < Math.min(buffer.length - 12, 4096); i++) {
       if (buffer[i] === 0xff && buffer[i + 1] === 0xd8 && buffer[i + 2] === 0xff) {
         return { data: buffer.subarray(i), isWxgf: false }
       }
-      if (buffer[i] === 0x89 && buffer[i + 1] === 0x50 && 
-          buffer[i + 2] === 0x4e && buffer[i + 3] === 0x47) {
+      if (buffer[i] === 0x89 && buffer[i + 1] === 0x50 &&
+        buffer[i + 2] === 0x4e && buffer[i + 3] === 0x47) {
         return { data: buffer.subarray(i), isWxgf: false }
       }
     }
-    
+
     // 提取 HEVC NALU 裸流
     const hevcData = this.extractHevcNalu(buffer)
     if (!hevcData || hevcData.length < 100) {
       return { data: buffer, isWxgf: true }
     }
-    
+
     // 尝试用 ffmpeg 转换
     try {
       const jpgData = await this.convertHevcToJpg(hevcData)
@@ -1507,7 +1505,7 @@ export class ImageDecryptService {
     } catch {
       // ffmpeg 转换失败
     }
-    
+
     return { data: hevcData, isWxgf: true }
   }
 
@@ -1517,23 +1515,23 @@ export class ImageDecryptService {
   private extractHevcNalu(buffer: Buffer): Buffer | null {
     const nalUnits: Buffer[] = []
     let i = 4
-    
+
     while (i < buffer.length - 4) {
-      if (buffer[i] === 0x00 && buffer[i + 1] === 0x00 && 
-          buffer[i + 2] === 0x00 && buffer[i + 3] === 0x01) {
+      if (buffer[i] === 0x00 && buffer[i + 1] === 0x00 &&
+        buffer[i + 2] === 0x00 && buffer[i + 3] === 0x01) {
         let nalStart = i
         let nalEnd = buffer.length
-        
+
         for (let j = i + 4; j < buffer.length - 3; j++) {
           if (buffer[j] === 0x00 && buffer[j + 1] === 0x00) {
-            if (buffer[j + 2] === 0x01 || 
-                (buffer[j + 2] === 0x00 && j + 3 < buffer.length && buffer[j + 3] === 0x01)) {
+            if (buffer[j + 2] === 0x01 ||
+              (buffer[j + 2] === 0x00 && j + 3 < buffer.length && buffer[j + 3] === 0x01)) {
               nalEnd = j
               break
             }
           }
         }
-        
+
         const nalUnit = buffer.subarray(nalStart, nalEnd)
         if (nalUnit.length > 3) {
           nalUnits.push(nalUnit)
@@ -1543,17 +1541,17 @@ export class ImageDecryptService {
         i++
       }
     }
-    
+
     if (nalUnits.length === 0) {
       for (let j = 4; j < buffer.length - 4; j++) {
-        if (buffer[j] === 0x00 && buffer[j + 1] === 0x00 && 
-            buffer[j + 2] === 0x00 && buffer[j + 3] === 0x01) {
+        if (buffer[j] === 0x00 && buffer[j + 1] === 0x00 &&
+          buffer[j + 2] === 0x00 && buffer[j + 3] === 0x01) {
           return buffer.subarray(j)
         }
       }
       return null
     }
-    
+
     return Buffer.concat(nalUnits)
   }
 
@@ -1563,11 +1561,11 @@ export class ImageDecryptService {
   private getFfmpegPath(): string {
     const staticPath = getStaticFfmpegPath()
     this.logInfo('ffmpeg 路径检测', { staticPath, exists: staticPath ? existsSync(staticPath) : false })
-    
+
     if (staticPath) {
       return staticPath
     }
-    
+
     // 回退到系统 ffmpeg
     return 'ffmpeg'
   }
@@ -1578,12 +1576,12 @@ export class ImageDecryptService {
   private convertHevcToJpg(hevcData: Buffer): Promise<Buffer | null> {
     const ffmpeg = this.getFfmpegPath()
     this.logInfo('ffmpeg 转换开始', { ffmpegPath: ffmpeg, hevcSize: hevcData.length })
-    
+
     return new Promise((resolve) => {
       const { spawn } = require('child_process')
       const chunks: Buffer[] = []
       const errChunks: Buffer[] = []
-      
+
       const proc = spawn(ffmpeg, [
         '-hide_banner',
         '-loglevel', 'error',
@@ -1593,14 +1591,14 @@ export class ImageDecryptService {
         '-q:v', '3',
         '-f', 'mjpeg',
         'pipe:1'
-      ], { 
+      ], {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
       })
-      
+
       proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
       proc.stderr.on('data', (chunk: Buffer) => errChunks.push(chunk))
-      
+
       proc.on('close', (code: number) => {
         if (code === 0 && chunks.length > 0) {
           this.logInfo('ffmpeg 转换成功', { outputSize: Buffer.concat(chunks).length })
@@ -1611,12 +1609,12 @@ export class ImageDecryptService {
           resolve(null)
         }
       })
-      
+
       proc.on('error', (err: Error) => {
         this.logInfo('ffmpeg 进程错误', { error: err.message })
         resolve(null)
       })
-      
+
       proc.stdin.write(hevcData)
       proc.stdin.end()
     })

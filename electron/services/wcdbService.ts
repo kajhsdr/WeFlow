@@ -341,6 +341,13 @@ export class WcdbService {
     return this.callWorker('getMessageById', { sessionId, localId })
   }
 
+  /**
+   * 获取语音数据
+   */
+  async getVoiceData(sessionId: string, createTime: number, candidates: string[], svrId: string | number = 0): Promise<{ success: boolean; hex?: string; error?: string }> {
+    return this.callWorker('getVoiceData', { sessionId, createTime, candidates, svrId })
+  }
+
 }
 
 export const wcdbService = new WcdbService()

@@ -20,6 +20,7 @@ interface ExportOptions {
   exportImages: boolean
   exportVoices: boolean
   exportEmojis: boolean
+  exportVoiceAsText: boolean
 }
 
 interface ExportResult {
@@ -54,7 +55,8 @@ function ExportPage() {
     exportMedia: false,
     exportImages: true,
     exportVoices: true,
-    exportEmojis: true
+    exportEmojis: true,
+    exportVoiceAsText: false
   })
 
   const loadSessions = useCallback(async () => {
@@ -158,6 +160,7 @@ function ExportPage() {
         exportImages: options.exportMedia && options.exportImages,
         exportVoices: options.exportMedia && options.exportVoices,
         exportEmojis: options.exportMedia && options.exportEmojis,
+        exportVoiceAsText: options.exportMedia && options.exportVoiceAsText,
         dateRange: options.useAllTime ? null : options.dateRange ? {
           start: Math.floor(options.dateRange.start.getTime() / 1000),
           // 将结束日期设置为当天的 23:59:59,以包含当天的所有消息
@@ -372,9 +375,9 @@ function ExportPage() {
                   <span className="slider"></span>
                 </label>
               </div>
-              
+
               <div className="media-option-divider"></div>
-              
+
               <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
                 <div className="media-checkbox-info">
                   <span className="media-checkbox-title">图片</span>
@@ -387,9 +390,9 @@ function ExportPage() {
                   onChange={e => setOptions({ ...options, exportImages: e.target.checked })}
                 />
               </label>
-              
+
               <div className="media-option-divider"></div>
-              
+
               <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
                 <div className="media-checkbox-info">
                   <span className="media-checkbox-title">语音</span>
@@ -402,9 +405,24 @@ function ExportPage() {
                   onChange={e => setOptions({ ...options, exportVoices: e.target.checked })}
                 />
               </label>
-              
+
               <div className="media-option-divider"></div>
-              
+
+              <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
+                <div className="media-checkbox-info">
+                  <span className="media-checkbox-title">语音转文字</span>
+                  <span className="media-checkbox-desc">将语音消息转换为文字导出</span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={options.exportVoiceAsText}
+                  disabled={!options.exportMedia}
+                  onChange={e => setOptions({ ...options, exportVoiceAsText: e.target.checked })}
+                />
+              </label>
+
+              <div className="media-option-divider"></div>
+
               <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
                 <div className="media-checkbox-info">
                   <span className="media-checkbox-title">表情</span>

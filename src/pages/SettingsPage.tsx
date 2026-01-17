@@ -13,19 +13,6 @@ import './SettingsPage.scss'
 
 type SettingsTab = 'appearance' | 'database' | 'whisper' | 'cache' | 'about'
 
-const whisperModels = [
-  { value: 'tiny', label: 'tiny (75 MB)' },
-  { value: 'base', label: 'base (142 MB)' },
-  { value: 'small', label: 'small (466 MB)' },
-  { value: 'medium', label: 'medium (1.5 GB)' },
-  { value: 'large-v3', label: 'large-v3 (2.9 GB)' }
-]
-
-const whisperSources = [
-  { value: 'official', label: 'HuggingFace 官方' },
-  { value: 'tsinghua', label: '清华镜像 (hf-mirror)' }
-]
-
 const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
   { id: 'appearance', label: '外观', icon: Palette },
   { id: 'database', label: '数据库连接', icon: Database },
@@ -57,10 +44,10 @@ function SettingsPage() {
   const [logEnabled, setLogEnabled] = useState(false)
   const [whisperModelName, setWhisperModelName] = useState('base')
   const [whisperModelDir, setWhisperModelDir] = useState('')
-  const [whisperDownloadSource, setWhisperDownloadSource] = useState('tsinghua')
   const [isWhisperDownloading, setIsWhisperDownloading] = useState(false)
   const [whisperDownloadProgress, setWhisperDownloadProgress] = useState(0)
-  const [whisperModelStatus, setWhisperModelStatus] = useState<{ exists: boolean; path?: string } | null>(null)
+  const [whisperModelStatus, setWhisperModelStatus] = useState<{ exists: boolean; modelPath?: string; tokensPath?: string } | null>(null)
+  const [autoTranscribeVoice, setAutoTranscribeVoice] = useState(false)
 
   const [isLoading, setIsLoadingState] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
@@ -124,7 +111,7 @@ function SettingsPage() {
       const savedImageAesKey = await configService.getImageAesKey()
       const savedWhisperModelName = await configService.getWhisperModelName()
       const savedWhisperModelDir = await configService.getWhisperModelDir()
-      const savedWhisperSource = await configService.getWhisperDownloadSource()
+      const savedAutoTranscribe = await configService.getAutoTranscribeVoice()
 
       if (savedKey) setDecryptKey(savedKey)
       if (savedPath) setDbPath(savedPath)
@@ -135,9 +122,8 @@ function SettingsPage() {
       }
       if (savedImageAesKey) setImageAesKey(savedImageAesKey)
       setLogEnabled(savedLogEnabled)
-      if (savedWhisperModelName) setWhisperModelName(savedWhisperModelName)
+      setAutoTranscribeVoice(savedAutoTranscribe)
       if (savedWhisperModelDir) setWhisperModelDir(savedWhisperModelDir)
-      if (savedWhisperSource) setWhisperDownloadSource(savedWhisperSource)
     } catch (e) {
       console.error('加载配置失败:', e)
     }
@@ -145,14 +131,15 @@ function SettingsPage() {
 
 
 
-  const refreshWhisperStatus = async (modelNameValue = whisperModelName, modelDirValue = whisperModelDir) => {
+  const refreshWhisperStatus = async (modelDirValue = whisperModelDir) => {
     try {
-      const result = await window.electronAPI.whisper?.getModelStatus({
-        modelName: modelNameValue,
-        downloadDir: modelDirValue || undefined
-      })
+      const result = await window.electronAPI.whisper?.getModelStatus()
       if (result?.success) {
-        setWhisperModelStatus({ exists: Boolean(result.exists), path: result.path })
+        setWhisperModelStatus({
+          exists: Boolean(result.exists),
+          modelPath: result.modelPath,
+          tokensPath: result.tokensPath
+        })
       }
     } catch {
       setWhisperModelStatus(null)
@@ -178,17 +165,16 @@ function SettingsPage() {
 
   useEffect(() => {
     const removeListener = window.electronAPI.whisper?.onDownloadProgress?.((payload) => {
-      if (payload.modelName !== whisperModelName) return
       if (typeof payload.percent === 'number') {
         setWhisperDownloadProgress(payload.percent)
       }
     })
     return () => removeListener?.()
-  }, [whisperModelName])
+  }, [])
 
   useEffect(() => {
-    void refreshWhisperStatus(whisperModelName, whisperModelDir)
-  }, [whisperModelName, whisperModelDir])
+    void refreshWhisperStatus(whisperModelDir)
+  }, [whisperModelDir])
 
   const handleCheckUpdate = async () => {
     setIsCheckingUpdate(true)
@@ -331,30 +317,21 @@ function SettingsPage() {
     await configService.setWhisperModelName(value)
   }
 
-  const handleWhisperSourceChange = async (value: string) => {
-    setWhisperDownloadSource(value)
-    await configService.setWhisperDownloadSource(value)
-  }
-
   const handleDownloadWhisperModel = async () => {
     if (isWhisperDownloading) return
     setIsWhisperDownloading(true)
     setWhisperDownloadProgress(0)
     try {
-      const result = await window.electronAPI.whisper.downloadModel({
-        modelName: whisperModelName,
-        downloadDir: whisperModelDir || undefined,
-        source: whisperDownloadSource
-      })
+      const result = await window.electronAPI.whisper.downloadModel()
       if (result.success) {
         setWhisperDownloadProgress(100)
-        showMessage('Whisper 模型下载完成', true)
-        await refreshWhisperStatus(whisperModelName, whisperModelDir)
+        showMessage('SenseVoiceSmall 模型下载完成', true)
+        await refreshWhisperStatus(whisperModelDir)
       } else {
-        showMessage(result.error || 'Whisper 模型下载失败', false)
+        showMessage(result.error || '模型下载失败', false)
       }
     } catch (e) {
-      showMessage(`Whisper 模型下载失败: ${e}`, false)
+      showMessage(`模型下载失败: ${e}`, false)
     } finally {
       setIsWhisperDownloading(false)
     }
@@ -475,9 +452,8 @@ function SettingsPage() {
       } else {
         await configService.setImageAesKey('')
       }
-      await configService.setWhisperModelName(whisperModelName)
       await configService.setWhisperModelDir(whisperModelDir)
-      await configService.setWhisperDownloadSource(whisperDownloadSource)
+      await configService.setAutoTranscribeVoice(autoTranscribeVoice)
       await configService.setOnboardingDone(true)
 
       showMessage('配置保存成功，正在测试连接...', true)
@@ -513,9 +489,8 @@ function SettingsPage() {
       setWxid('')
       setCachePath('')
       setLogEnabled(false)
-      setWhisperModelName('base')
+      setAutoTranscribeVoice(false)
       setWhisperModelDir('')
-      setWhisperDownloadSource('tsinghua')
       setWhisperModelStatus(null)
       setWhisperDownloadProgress(0)
       setIsWhisperDownloading(false)
@@ -674,14 +649,14 @@ function SettingsPage() {
         <label>账号 wxid</label>
         <span className="form-hint">微信账号标识</span>
         <div className="wxid-input-wrapper" ref={wxidDropdownRef}>
-          <input 
-            type="text" 
-            placeholder="例如: wxid_xxxxxx" 
-            value={wxid} 
-            onChange={(e) => setWxid(e.target.value)} 
+          <input
+            type="text"
+            placeholder="例如: wxid_xxxxxx"
+            value={wxid}
+            onChange={(e) => setWxid(e.target.value)}
           />
-          <button 
-            type="button" 
+          <button
+            type="button"
             className={`wxid-dropdown-btn ${showWxidSelect ? 'open' : ''}`}
             onClick={() => wxidOptions.length > 0 ? setShowWxidSelect(!showWxidSelect) : handleScanWxid()}
             title={wxidOptions.length > 0 ? "选择已检测到的账号" : "扫描账号"}
@@ -691,8 +666,8 @@ function SettingsPage() {
           {showWxidSelect && wxidOptions.length > 0 && (
             <div className="wxid-dropdown">
               {wxidOptions.map((opt) => (
-                <div 
-                  key={opt.wxid} 
+                <div
+                  key={opt.wxid}
                   className={`wxid-option ${opt.wxid === wxid ? 'active' : ''}`}
                   onClick={() => handleSelectWxid(opt.wxid)}
                 >
@@ -759,34 +734,31 @@ function SettingsPage() {
   )
   const renderWhisperTab = () => (
     <div className="tab-content">
-      <p className="section-desc">语音解密后自动转写为文字</p>
-      <div className="form-group whisper-section">
-        <label>语音识别模型 (Whisper)</label>
-        <span className="form-hint">语音解密后自动转文字，模型越大越准确但下载更慢</span>
-        <div className="whisper-grid">
-          <div className="whisper-field">
-            <span className="field-label">模型</span>
-            <select
-              value={whisperModelName}
-              onChange={(e) => handleWhisperModelChange(e.target.value)}
-            >
-              {whisperModels.map((model) => (
-                <option key={model.value} value={model.value}>{model.label}</option>
-              ))}
-            </select>
-          </div>
-          <div className="whisper-field">
-            <span className="field-label">下载源</span>
-            <select
-              value={whisperDownloadSource}
-              onChange={(e) => handleWhisperSourceChange(e.target.value)}
-            >
-              {whisperSources.map((source) => (
-                <option key={source.value} value={source.value}>{source.label}</option>
-              ))}
-            </select>
-          </div>
+      <div className="form-group">
+        <label>自动语音转文字</label>
+        <span className="form-hint">语音解密后自动转写为文字（需下载模型）</span>
+        <div className="log-toggle-line">
+          <span className="log-status">{autoTranscribeVoice ? '已开启' : '已关闭'}</span>
+          <label className="switch" htmlFor="auto-transcribe-toggle">
+            <input
+              id="auto-transcribe-toggle"
+              className="switch-input"
+              type="checkbox"
+              checked={autoTranscribeVoice}
+              onChange={async (e) => {
+                const enabled = e.target.checked
+                setAutoTranscribeVoice(enabled)
+                await configService.setAutoTranscribeVoice(enabled)
+                showMessage(enabled ? '已开启自动转文字' : '已关闭自动转文字', true)
+              }}
+            />
+            <span className="switch-slider" />
+          </label>
         </div>
+      </div>
+      <div className="form-group whisper-section">
+        <label>语音识别模型 (SenseVoiceSmall)</label>
+        <span className="form-hint">基于 Sherpa-onnx，支持中文、英文、日文、韩文</span>
         <span className="form-hint">模型下载目录</span>
         <input
           type="text"
@@ -801,9 +773,9 @@ function SettingsPage() {
         </div>
         <div className="whisper-status-line">
           <span className={`status ${whisperModelStatus?.exists ? 'ok' : 'warn'}`}>
-            {whisperModelStatus?.exists ? '已下载' : '未下载'}
+            {whisperModelStatus?.exists ? '已下载 (240 MB)' : '未下载 (240 MB)'}
           </span>
-          {whisperModelStatus?.path && <span className="path">{whisperModelStatus.path}</span>}
+          {whisperModelStatus?.modelPath && <span className="path">{whisperModelStatus.modelPath}</span>}
         </div>
         {isWhisperDownloading ? (
           <div className="whisper-progress">
@@ -917,8 +889,8 @@ function SettingsPage() {
             </div>
             <div className="wxid-dialog-list">
               {wxidOptions.map((opt) => (
-                <div 
-                  key={opt.wxid} 
+                <div
+                  key={opt.wxid}
                   className={`wxid-dialog-item ${opt.wxid === wxid ? 'active' : ''}`}
                   onClick={() => handleSelectWxid(opt.wxid)}
                 >

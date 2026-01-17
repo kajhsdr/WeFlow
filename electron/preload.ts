@@ -106,8 +106,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     close: () => ipcRenderer.invoke('chat:close'),
     getSessionDetail: (sessionId: string) => ipcRenderer.invoke('chat:getSessionDetail', sessionId),
     getImageData: (sessionId: string, msgId: string) => ipcRenderer.invoke('chat:getImageData', sessionId, msgId),
-    getVoiceData: (sessionId: string, msgId: string) => ipcRenderer.invoke('chat:getVoiceData', sessionId, msgId),
-    getVoiceTranscript: (sessionId: string, msgId: string) => ipcRenderer.invoke('chat:getVoiceTranscript', sessionId, msgId)
+    getVoiceData: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number) =>
+      ipcRenderer.invoke('chat:getVoiceData', sessionId, msgId, createTime, serverId),
+    getVoiceTranscript: (sessionId: string, msgId: string) => ipcRenderer.invoke('chat:getVoiceTranscript', sessionId, msgId),
+    onVoiceTranscriptPartial: (callback: (payload: { msgId: string; text: string }) => void) => {
+      const listener = (_: any, payload: { msgId: string; text: string }) => callback(payload)
+      ipcRenderer.on('chat:voiceTranscriptPartial', listener)
+      return () => ipcRenderer.removeListener('chat:voiceTranscriptPartial', listener)
+    }
   },
 
 

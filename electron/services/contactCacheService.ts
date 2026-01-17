@@ -15,7 +15,7 @@ export class ContactCacheService {
   constructor(cacheBasePath?: string) {
     const basePath = cacheBasePath && cacheBasePath.trim().length > 0
       ? cacheBasePath
-      : join(app.getPath('userData'), 'WeFlowCache')
+      : join(app.getPath('documents'), 'WeFlow')
     this.cacheFilePath = join(basePath, 'contacts.json')
     this.ensureCacheDir()
     this.loadCache()

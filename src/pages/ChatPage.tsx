@@ -5,7 +5,20 @@ import { useChatStore } from '../stores/chatStore'
 import type { ChatSession, Message } from '../types/models'
 import { getEmojiPath } from 'wechat-emojis'
 import { ImagePreview } from '../components/ImagePreview'
+import { VoiceTranscribeDialog } from '../components/VoiceTranscribeDialog'
+import { AnimatedStreamingText } from '../components/AnimatedStreamingText'
 import './ChatPage.scss'
+
+// 系统消息类型常量
+const SYSTEM_MESSAGE_TYPES = [
+  10000,        // 系统消息
+  266287972401, // 拍一拍
+]
+
+// 判断是否为系统消息
+function isSystemMessage(localType: number): boolean {
+  return SYSTEM_MESSAGE_TYPES.includes(localType)
+}
 
 interface ChatPageProps {
   // 保留接口以备将来扩展
@@ -138,6 +151,8 @@ function ChatPage(_props: ChatPageProps) {
   const [highlightedMessageKeys, setHighlightedMessageKeys] = useState<string[]>([])
   const [isRefreshingSessions, setIsRefreshingSessions] = useState(false)
   const [hasInitialMessages, setHasInitialMessages] = useState(false)
+  const [showVoiceTranscribeDialog, setShowVoiceTranscribeDialog] = useState(false)
+  const [pendingVoiceTranscriptRequest, setPendingVoiceTranscriptRequest] = useState<{ sessionId: string; messageId: string } | null>(null)
 
   // 联系人信息加载控制
   const isEnrichingRef = useRef(false)
@@ -1128,10 +1143,10 @@ function ChatPage(_props: ChatPageProps) {
                   const prevMsg = index > 0 ? messages[index - 1] : undefined
                   const showDateDivider = shouldShowDateDivider(msg, prevMsg)
 
-                  // 显示时间：第一条消息，或者与上一条消息间隔超过5分钟
+                  // 显示时间:第一条消息,或者与上一条消息间隔超过5分钟
                   const showTime = !prevMsg || (msg.createTime - prevMsg.createTime > 300)
                   const isSent = msg.isSend === 1
-                  const isSystem = msg.localType === 10000
+                  const isSystem = isSystemMessage(msg.localType)
 
                   // 系统消息居中显示
                   const wrapperClass = isSystem ? 'system' : (isSent ? 'sent' : 'received')
@@ -1272,6 +1287,35 @@ function ChatPage(_props: ChatPageProps) {
           </div>
         )}
       </div>
+
+      {/* 语音转文字模型下载弹窗 */}
+      {showVoiceTranscribeDialog && (
+        <VoiceTranscribeDialog
+          onClose={() => {
+            setShowVoiceTranscribeDialog(false)
+            setPendingVoiceTranscriptRequest(null)
+          }}
+          onDownloadComplete={async () => {
+            setShowVoiceTranscribeDialog(false)
+            // 下载完成后，继续转写
+            if (pendingVoiceTranscriptRequest) {
+              try {
+                const result = await window.electronAPI.chat.getVoiceTranscript(
+                  pendingVoiceTranscriptRequest.sessionId,
+                  pendingVoiceTranscriptRequest.messageId
+                )
+                if (result.success) {
+                  const cacheKey = `voice-transcript:${pendingVoiceTranscriptRequest.messageId}`
+                  voiceTranscriptCache.set(cacheKey, (result.transcript || '').trim())
+                }
+              } catch (error) {
+                console.error('[ChatPage] 语音转文字失败:', error)
+              }
+            }
+            setPendingVoiceTranscriptRequest(null)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -1292,7 +1336,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat }:
   myAvatarUrl?: string;
   isGroupChat?: boolean;
 }) {
-  const isSystem = message.localType === 10000
+  const isSystem = isSystemMessage(message.localType)
   const isEmoji = message.localType === 47
   const isImage = message.localType === 3
   const isVoice = message.localType === 34
@@ -1570,7 +1614,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat }:
     if (!isImage) return
     if (imageLocalPath) return // 已有图片，不需要解密
     if (!message.imageMd5 && !message.imageDatName) return
-    
+
     const container = imageContainerRef.current
     if (!container) return
 
@@ -1612,8 +1656,32 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat }:
     }
   }, [isVoice])
 
+  // 监听流式转写结果
+  useEffect(() => {
+    if (!isVoice) return
+    const removeListener = window.electronAPI.chat.onVoiceTranscriptPartial?.((payload: { msgId: string; text: string }) => {
+      if (payload.msgId === String(message.localId)) {
+        setVoiceTranscript(payload.text)
+        voiceTranscriptCache.set(voiceTranscriptCacheKey, payload.text)
+      }
+    })
+    return () => removeListener?.()
+  }, [isVoice, message.localId, voiceTranscriptCacheKey])
+
   const requestVoiceTranscript = useCallback(async () => {
     if (voiceTranscriptLoading || voiceTranscriptRequestedRef.current) return
+
+    // 检查模型状态
+    const modelStatus = await window.electronAPI.whisper?.getModelStatus()
+    if (!modelStatus?.exists) {
+      // 模型未下载，抛出错误让外层处理
+      const error: any = new Error('MODEL_NOT_DOWNLOADED')
+      error.requiresDownload = true
+      error.sessionId = session.username
+      error.messageId = String(message.localId)
+      throw error
+    }
+
     voiceTranscriptRequestedRef.current = true
     setVoiceTranscriptLoading(true)
     setVoiceTranscriptError(false)
@@ -1627,7 +1695,13 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat }:
         setVoiceTranscriptError(true)
         voiceTranscriptRequestedRef.current = false
       }
-    } catch {
+    } catch (error: any) {
+      // 检查是否是模型未下载错误
+      if (error?.requiresDownload) {
+        // 不显示错误状态，等待用户手动点击转文字按钮时会触发下载弹窗
+        voiceTranscriptRequestedRef.current = false
+        return
+      }
       setVoiceTranscriptError(true)
       voiceTranscriptRequestedRef.current = false
     } finally {
@@ -1635,13 +1709,23 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat }:
     }
   }, [message.localId, session.username, voiceTranscriptCacheKey, voiceTranscriptLoading])
 
+  // 根据设置决定是否自动转写
+  const [autoTranscribeEnabled, setAutoTranscribeEnabled] = useState(false)
+
   useEffect(() => {
+    window.electronAPI.config.get('autoTranscribeVoice').then((value) => {
+      setAutoTranscribeEnabled(value === true)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!autoTranscribeEnabled) return
     if (!isVoice) return
     if (!voiceDataUrl) return
     if (voiceTranscriptError) return
     if (voiceTranscriptLoading || voiceTranscript !== undefined || voiceTranscriptRequestedRef.current) return
     void requestVoiceTranscript()
-  }, [isVoice, voiceDataUrl, voiceTranscript, voiceTranscriptError, voiceTranscriptLoading, requestVoiceTranscript])
+  }, [autoTranscribeEnabled, isVoice, voiceDataUrl, voiceTranscript, voiceTranscriptError, voiceTranscriptLoading, requestVoiceTranscript])
 
   if (isSystem) {
     return (
@@ -1771,7 +1855,12 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat }:
           setVoiceLoading(true)
           setVoiceError(false)
           try {
-            const result = await window.electronAPI.chat.getVoiceData(session.username, String(message.localId))
+            const result = await window.electronAPI.chat.getVoiceData(
+              session.username,
+              String(message.localId),
+              message.createTime,
+              message.serverId
+            )
             if (result.success && result.data) {
               const url = `data:audio/wav;base64,${result.data}`
               voiceDataUrlCache.set(voiceCacheKey, url)
@@ -1842,6 +1931,22 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat }:
               {showDecryptHint && <span className="voice-hint">点击解密</span>}
               {voiceError && <span className="voice-error">播放失败</span>}
             </div>
+            {/* 转文字按钮 */}
+            {voiceDataUrl && !voiceTranscript && !voiceTranscriptLoading && (
+              <button
+                className="voice-transcribe-btn"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void requestVoiceTranscript()
+                }}
+                title="转文字"
+                type="button"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+              </button>
+            )}
           </div>
           {showTranscript && (
             <div
@@ -1849,7 +1954,16 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat }:
               onClick={handleTranscriptRetry}
               title={voiceTranscriptError ? '点击重试语音转写' : undefined}
             >
-              {transcriptDisplay}
+              {voiceTranscriptError ? (
+                '转写失败，点击重试'
+              ) : !voiceTranscript ? (
+                voiceTranscriptLoading ? '转写中...' : '未识别到文字'
+              ) : (
+                <AnimatedStreamingText
+                  text={transcriptText}
+                  loading={voiceTranscriptLoading}
+                />
+              )}
             </div>
           )}
         </div>

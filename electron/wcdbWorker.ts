@@ -110,6 +110,12 @@ if (parentPort) {
                 case 'getMessageById':
                     result = await core.getMessageById(payload.sessionId, payload.localId)
                     break
+                case 'getVoiceData':
+                    result = await core.getVoiceData(payload.sessionId, payload.createTime, payload.candidates, payload.svrId)
+                    if (!result.success) {
+                        console.error('[wcdbWorker] getVoiceData failed:', result.error)
+                    }
+                    break
                 default:
                     result = { success: false, error: `Unknown method: ${type}` }
             }

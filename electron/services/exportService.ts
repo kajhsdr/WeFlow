@@ -70,6 +70,7 @@ export interface ExportOptions {
   exportImages?: boolean
   exportVoices?: boolean
   exportEmojis?: boolean
+  exportVoiceAsText?: boolean
 }
 
 interface MediaExportItem {
@@ -227,6 +228,7 @@ class ExportService {
 
   /**
    * 解析消息内容为可读文本
+   * 注意：语音消息在这里返回占位符，实际转文字在导出时异步处理
    */
   private parseMessageContent(content: string, localType: number): string | null {
     if (!content) return null
@@ -235,7 +237,7 @@ class ExportService {
       case 1:
         return this.stripSenderPrefix(content)
       case 3: return '[图片]'
-      case 34: return '[语音消息]'
+      case 34: return '[语音消息]'  // 占位符，导出时会替换为转文字结果
       case 42: return '[名片]'
       case 43: return '[视频]'
       case 47: return '[动画表情]'
@@ -246,6 +248,7 @@ class ExportService {
       }
       case 50: return this.parseVoipMessage(content)
       case 10000: return this.cleanSystemMessage(content)
+      case 266287972401: return this.cleanSystemMessage(content)  // 拍一拍
       default:
         if (content.includes('<type>57</type>')) {
           const title = this.extractXmlValue(content, 'title')
@@ -270,20 +273,20 @@ class ExportService {
 
   private cleanSystemMessage(content: string): string {
     if (!content) return '[系统消息]'
-    
+
     // 先尝试提取特定的系统消息内容
     // 1. 提取 sysmsg 中的文本内容
     const sysmsgTextMatch = /<sysmsg[^>]*>([\s\S]*?)<\/sysmsg>/i.exec(content)
     if (sysmsgTextMatch) {
       content = sysmsgTextMatch[1]
     }
-    
+
     // 2. 提取 revokemsg 撤回消息
     const revokeMatch = /<replacemsg><!\[CDATA\[(.*?)\]\]><\/replacemsg>/i.exec(content)
     if (revokeMatch) {
       return revokeMatch[1].trim()
     }
-    
+
     // 3. 提取 pat 拍一拍消息
     const patMatch = /<template><!\[CDATA\[(.*?)\]\]><\/template>/i.exec(content)
     if (patMatch) {
@@ -296,10 +299,10 @@ class ExportService {
         .replace(/<[^>]+>/g, '')
         .trim()
     }
-    
+
     // 4. 处理 CDATA 内容
     content = content.replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '')
-    
+
     // 5. 移除所有 XML 标签
     return content
       .replace(/<img[^>]*>/gi, '')
@@ -406,10 +409,10 @@ class ExportService {
     msg: any,
     sessionId: string,
     mediaDir: string,
-    options: { exportImages?: boolean; exportVoices?: boolean; exportEmojis?: boolean }
+    options: { exportImages?: boolean; exportVoices?: boolean; exportEmojis?: boolean; exportVoiceAsText?: boolean }
   ): Promise<MediaExportItem | null> {
     const localType = msg.localType
-    
+
     // 图片消息
     if (localType === 3 && options.exportImages) {
       const result = await this.exportImage(msg, sessionId, mediaDir)
@@ -418,12 +421,19 @@ class ExportService {
       }
       return result
     }
-    
+
     // 语音消息
-    if (localType === 34 && options.exportVoices) {
-      return this.exportVoice(msg, sessionId, mediaDir)
+    if (localType === 34) {
+      // 如果开启了语音转文字，优先转文字（不导出语音文件）
+      if (options.exportVoiceAsText) {
+        return null  // 转文字逻辑在消息内容处理中完成
+      }
+      // 否则导出语音文件
+      if (options.exportVoices) {
+        return this.exportVoice(msg, sessionId, mediaDir)
+      }
     }
-    
+
     // 动画表情
     if (localType === 47 && options.exportEmojis) {
       const result = await this.exportEmoji(msg, sessionId, mediaDir)
@@ -432,7 +442,7 @@ class ExportService {
       }
       return result
     }
-    
+
     return null
   }
 
@@ -449,7 +459,7 @@ class ExportService {
       // 使用消息对象中已提取的字段
       const imageMd5 = msg.imageMd5
       const imageDatName = msg.imageDatName
-      
+
       if (!imageMd5 && !imageDatName) {
         console.log('[ExportService] 图片消息缺少 md5 和 datName:', msg.localId)
         return null
@@ -485,9 +495,9 @@ class ExportService {
         const ext = this.getExtFromDataUrl(sourcePath)
         const fileName = `${imageMd5 || imageDatName || msg.localId}${ext}`
         const destPath = path.join(imagesDir, fileName)
-        
+
         fs.writeFileSync(destPath, Buffer.from(base64Data, 'base64'))
-        
+
         return {
           relativePath: `media/images/${fileName}`,
           kind: 'image'
@@ -501,11 +511,11 @@ class ExportService {
         const ext = path.extname(sourcePath) || '.jpg'
         const fileName = `${imageMd5 || imageDatName || msg.localId}${ext}`
         const destPath = path.join(imagesDir, fileName)
-        
+
         if (!fs.existsSync(destPath)) {
           fs.copyFileSync(sourcePath, destPath)
         }
-        
+
         return {
           relativePath: `media/images/${fileName}`,
           kind: 'image'
@@ -567,6 +577,22 @@ class ExportService {
   }
 
   /**
+   * 转写语音为文字
+   */
+  private async transcribeVoice(sessionId: string, msgId: string): Promise<string> {
+    try {
+      const transcript = await chatService.getVoiceTranscript(sessionId, msgId)
+      if (transcript.success && transcript.transcript) {
+        return `[语音转文字] ${transcript.transcript}`
+      }
+      return '[语音消息 - 转文字失败]'
+    } catch (e) {
+      console.error('[ExportService] 语音转文字失败:', e)
+      return '[语音消息 - 转文字失败]'
+    }
+  }
+
+  /**
    * 导出表情文件
    */
   private async exportEmoji(msg: any, sessionId: string, mediaDir: string): Promise<MediaExportItem | null> {
@@ -579,7 +605,7 @@ class ExportService {
       // 使用消息对象中已提取的字段
       const emojiUrl = msg.emojiCdnUrl
       const emojiMd5 = msg.emojiMd5
-      
+
       if (!emojiUrl && !emojiMd5) {
         console.log('[ExportService] 表情消息缺少 url 和 md5, localId:', msg.localId, 'content:', msg.content?.substring(0, 200))
         return null
@@ -669,7 +695,7 @@ class ExportService {
         if (url.includes('%')) {
           url = decodeURIComponent(url)
         }
-      } catch {}
+      } catch { }
       return url
     }
     // 备用：尝试 XML 标签形式
@@ -792,7 +818,7 @@ class ExportService {
           let imageDatName: string | undefined
           let emojiCdnUrl: string | undefined
           let emojiMd5: string | undefined
-          
+
           if (localType === 3 && content) {
             // 图片消息
             imageMd5 = this.extractImageMd5(content)
@@ -1058,6 +1084,31 @@ class ExportService {
   }
 
   /**
+   * 生成通用的导出元数据 (参考 ChatLab 格式)
+   */
+  private getExportMeta(
+    sessionId: string,
+    sessionInfo: { displayName: string },
+    isGroup: boolean,
+    sessionAvatar?: string
+  ): { chatlab: ChatLabHeader; meta: ChatLabMeta } {
+    return {
+      chatlab: {
+        version: '0.0.2',
+        exportedAt: Math.floor(Date.now() / 1000),
+        generator: 'WeFlow'
+      },
+      meta: {
+        name: sessionInfo.displayName,
+        platform: 'wechat',
+        type: isGroup ? 'group' : 'private',
+        ...(isGroup && { groupId: sessionId }),
+        ...(sessionAvatar && { groupAvatar: sessionAvatar })
+      }
+    }
+  }
+
+  /**
    * 导出单个会话为 ChatLab 格式
    */
   async exportSessionToChatLab(
@@ -1097,21 +1148,29 @@ class ExportService {
         phase: 'exporting'
       })
 
-      const chatLabMessages: ChatLabMessage[] = allMessages.map((msg) => {
+      const chatLabMessages: ChatLabMessage[] = []
+      for (const msg of allMessages) {
         const memberInfo = collected.memberSet.get(msg.senderUsername)?.member || {
           platformId: msg.senderUsername,
           accountName: msg.senderUsername,
           groupNickname: undefined
         }
-        return {
+
+        let content = this.parseMessageContent(msg.content, msg.localType)
+        // 如果是语音消息且开启了转文字
+        if (msg.localType === 34 && options.exportVoiceAsText) {
+          content = await this.transcribeVoice(sessionId, String(msg.localId))
+        }
+
+        chatLabMessages.push({
           sender: msg.senderUsername,
           accountName: memberInfo.accountName,
           groupNickname: memberInfo.groupNickname,
           timestamp: msg.createTime,
           type: this.convertMessageType(msg.localType, msg.content),
-          content: this.parseMessageContent(msg.content, msg.localType)
-        }
-      })
+          content: content
+        })
+      }
 
       const avatarMap = options.exportAvatars
         ? await this.exportAvatars(
@@ -1131,19 +1190,11 @@ class ExportService {
         return avatar ? { ...info.member, avatar } : info.member
       })
 
+      const { chatlab, meta } = this.getExportMeta(sessionId, sessionInfo, isGroup, sessionAvatar)
+
       const chatLabExport: ChatLabExport = {
-        chatlab: {
-          version: '0.0.1',
-          exportedAt: Math.floor(Date.now() / 1000),
-          generator: 'WeFlow'
-        },
-        meta: {
-          name: sessionInfo.displayName,
-          platform: 'wechat',
-          type: isGroup ? 'group' : 'private',
-          ...(isGroup && { groupId: sessionId }),
-          ...(sessionAvatar && { groupAvatar: sessionAvatar })
-        },
+        chatlab,
+        meta,
         members,
         messages: chatLabMessages
       }
@@ -1245,7 +1296,11 @@ class ExportService {
         phase: 'writing'
       })
 
-      const detailedExport = {
+      const { chatlab, meta } = this.getExportMeta(sessionId, sessionInfo, isGroup)
+
+      const detailedExport: any = {
+        chatlab,
+        meta,
         session: {
           wxid: sessionId,
           nickname: sessionInfo.displayName,
@@ -1316,7 +1371,7 @@ class ExportService {
 
       const sessionInfo = await this.getContactInfo(sessionId)
       const myInfo = await this.getContactInfo(cleanedMyWxid)
-      
+
       // 获取会话的备注信息
       const sessionContact = await wcdbService.getContact(sessionId)
       const sessionRemark = sessionContact.success && sessionContact.contact?.remark ? sessionContact.contact.remark : ''
@@ -1362,12 +1417,12 @@ class ExportService {
       worksheet.mergeCells(currentRow, 2, currentRow, 3)
       worksheet.getCell(currentRow, 2).value = sessionId
       worksheet.getCell(currentRow, 2).font = { name: 'Calibri', size: 11 }
-      
+
       worksheet.getCell(currentRow, 4).value = '昵称'
       worksheet.getCell(currentRow, 4).font = { name: 'Calibri', bold: true, size: 11 }
       worksheet.getCell(currentRow, 5).value = sessionNickname
       worksheet.getCell(currentRow, 5).font = { name: 'Calibri', size: 11 }
-      
+
       if (isGroup) {
         worksheet.getCell(currentRow, 6).value = '备注'
         worksheet.getCell(currentRow, 6).font = { name: 'Calibri', bold: true, size: 11 }
@@ -1378,11 +1433,36 @@ class ExportService {
       worksheet.getRow(currentRow).height = 20
       currentRow++
 
+      // 第三行：导出元数据
+      const { chatlab, meta: exportMeta } = this.getExportMeta(sessionId, sessionInfo, isGroup)
+      worksheet.getCell(currentRow, 1).value = '导出工具'
+      worksheet.getCell(currentRow, 1).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.getCell(currentRow, 2).value = chatlab.generator
+      worksheet.getCell(currentRow, 2).font = { name: 'Calibri', size: 10 }
+
+      worksheet.getCell(currentRow, 3).value = '导出版本'
+      worksheet.getCell(currentRow, 3).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.getCell(currentRow, 4).value = chatlab.version
+      worksheet.getCell(currentRow, 4).font = { name: 'Calibri', size: 10 }
+
+      worksheet.getCell(currentRow, 5).value = '平台'
+      worksheet.getCell(currentRow, 5).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.getCell(currentRow, 6).value = exportMeta.platform
+      worksheet.getCell(currentRow, 6).font = { name: 'Calibri', size: 10 }
+
+      worksheet.getCell(currentRow, 7).value = '导出时间'
+      worksheet.getCell(currentRow, 7).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.getCell(currentRow, 8).value = this.formatTimestamp(chatlab.exportedAt)
+      worksheet.getCell(currentRow, 8).font = { name: 'Calibri', size: 10 }
+
+      worksheet.getRow(currentRow).height = 20
+      currentRow++
+
       // 表头行
       const headers = ['序号', '时间', '发送者昵称', '发送者微信ID', '发送者备注', '发送者身份', '消息类型', '内容']
       const headerRow = worksheet.getRow(currentRow)
       headerRow.height = 22
-      
+
       headers.forEach((header, index) => {
         const cell = headerRow.getCell(index + 1)
         cell.value = header
@@ -1408,17 +1488,17 @@ class ExportService {
 
       // 填充数据
       const sortedMessages = collected.rows.sort((a, b) => a.createTime - b.createTime)
-      
+
       // 媒体导出设置
       const exportMediaEnabled = options.exportImages || options.exportVoices || options.exportEmojis
       const sessionDir = path.dirname(outputPath)  // 会话目录，用于媒体导出
-      
+
       // 媒体导出缓存
       const mediaCache = new Map<string, MediaExportItem | null>()
-      
+
       for (let i = 0; i < sortedMessages.length; i++) {
         const msg = sortedMessages[i]
-        
+
         // 导出媒体文件
         let mediaItem: MediaExportItem | null = null
         if (exportMediaEnabled) {
@@ -1429,18 +1509,19 @@ class ExportService {
             mediaItem = await this.exportMediaForMessage(msg, sessionId, sessionDir, {
               exportImages: options.exportImages,
               exportVoices: options.exportVoices,
-              exportEmojis: options.exportEmojis
+              exportEmojis: options.exportEmojis,
+              exportVoiceAsText: options.exportVoiceAsText
             })
             mediaCache.set(mediaKey, mediaItem)
           }
         }
-        
+
         // 确定发送者信息
         let senderRole: string
         let senderWxid: string
         let senderNickname: string
         let senderRemark: string = ''
-        
+
         if (msg.isSend) {
           // 我发送的消息
           senderRole = '我'
@@ -1450,7 +1531,7 @@ class ExportService {
         } else if (isGroup && msg.senderUsername) {
           // 群消息
           senderWxid = msg.senderUsername
-          
+
           // 用 getContact 获取联系人详情，分别取昵称和备注
           const contactDetail = await wcdbService.getContact(msg.senderUsername)
           if (contactDetail.success && contactDetail.contact) {
@@ -1481,12 +1562,12 @@ class ExportService {
 
         const row = worksheet.getRow(currentRow)
         row.height = 24
-        
+
         // 确定内容：如果有媒体文件导出成功则显示相对路径，否则显示解析后的内容
-        const contentValue = mediaItem 
-          ? mediaItem.relativePath 
+        const contentValue = mediaItem
+          ? mediaItem.relativePath
           : (this.parseMessageContent(msg.content, msg.localType) || '')
-        
+
         // 调试日志
         if (msg.localType === 3 || msg.localType === 47) {
           console.log('[ExportService] 媒体消息填充表格:', {
@@ -1497,7 +1578,7 @@ class ExportService {
             contentValue: contentValue?.substring(0, 100)
           })
         }
-        
+
         worksheet.getCell(currentRow, 1).value = i + 1
         worksheet.getCell(currentRow, 2).value = this.formatTimestamp(msg.createTime)
         worksheet.getCell(currentRow, 3).value = senderNickname
@@ -1506,14 +1587,14 @@ class ExportService {
         worksheet.getCell(currentRow, 6).value = senderRole
         worksheet.getCell(currentRow, 7).value = this.getMessageTypeName(msg.localType)
         worksheet.getCell(currentRow, 8).value = contentValue
-        
+
         // 设置每个单元格的样式
         for (let col = 1; col <= 8; col++) {
           const cell = worksheet.getCell(currentRow, col)
           cell.font = { name: 'Calibri', size: 11 }
           cell.alignment = { vertical: 'middle', wrapText: false }
         }
-        
+
         currentRow++
 
         // 每处理 100 条消息报告一次进度
@@ -1548,14 +1629,14 @@ class ExportService {
       return { success: true }
     } catch (e) {
       console.error('ExportService: 导出 Excel 失败:', e)
-      
+
       // 处理文件被占用的错误
       if (e instanceof Error) {
         if (e.message.includes('EBUSY') || e.message.includes('resource busy') || e.message.includes('locked')) {
           return { success: false, error: '文件已经打开，请关闭后再导出' }
         }
       }
-      
+
       return { success: false, error: String(e) }
     }
   }
@@ -1594,13 +1675,13 @@ class ExportService {
         })
 
         const safeName = sessionInfo.displayName.replace(/[<>:"/\\|?*]/g, '_')
-        
+
         // 为每个会话创建单独的文件夹
         const sessionDir = path.join(outputDir, safeName)
         if (!fs.existsSync(sessionDir)) {
           fs.mkdirSync(sessionDir, { recursive: true })
         }
-        
+
         let ext = '.json'
         if (options.format === 'chatlab-jsonl') ext = '.jsonl'
         else if (options.format === 'excel') ext = '.xlsx'

@@ -48,6 +48,7 @@ export class WcdbCore {
   private wcdbGetMessageById: any = null
   private wcdbGetEmoticonCdnUrl: any = null
   private wcdbGetDbStatus: any = null
+  private wcdbGetVoiceData: any = null
   private avatarUrlCache: Map<string, { url?: string; updatedAt: number }> = new Map()
   private readonly avatarCacheTtlMs = 10 * 60 * 1000
   private logTimer: NodeJS.Timeout | null = null
@@ -108,12 +109,13 @@ export class WcdbCore {
 
   private writeLog(message: string, force = false): void {
     if (!force && !this.isLogEnabled()) return
+    const line = `[${new Date().toISOString()}] ${message}`
+    console.log(`[WCDB] ${line}`)
     try {
       const base = this.userDataPath || process.env.WCDB_LOG_DIR || process.cwd()
       const dir = join(base, 'logs')
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-      const line = `[${new Date().toISOString()}] ${message}\n`
-      appendFileSync(join(dir, 'wcdb.log'), line, { encoding: 'utf8' })
+      appendFileSync(join(dir, 'wcdb.log'), line + '\n', { encoding: 'utf8' })
     } catch { }
   }
 
@@ -343,6 +345,13 @@ export class WcdbCore {
         this.wcdbGetDbStatus = this.lib.func('int32 wcdb_get_db_status(int64 handle, _Out_ void** outJson)')
       } catch {
         this.wcdbGetDbStatus = null
+      }
+
+      // wcdb_status wcdb_get_voice_data(wcdb_handle handle, const char* session_id, int32_t create_time, const char* candidates_json, char** out_hex)
+      try {
+        this.wcdbGetVoiceData = this.lib.func('int32 wcdb_get_voice_data(int64 handle, const char* sessionId, int32 createTime, int64 svrId, const char* candidatesJson, _Out_ void** outHex)')
+      } catch {
+        this.wcdbGetVoiceData = null
       }
 
       // 初始化
@@ -1295,9 +1304,7 @@ export class WcdbCore {
     } catch (e) {
       return { success: false, error: String(e) }
     }
-  }
-
-  async getMessageById(sessionId: string, localId: number): Promise<{ success: boolean; message?: any; error?: string }> {
+  } async getMessageById(sessionId: string, localId: number): Promise<{ success: boolean; message?: any; error?: string }> {
     if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
     try {
       const outPtr = [null as any]
@@ -1313,5 +1320,21 @@ export class WcdbCore {
       return { success: false, error: String(e) }
     }
   }
-}
 
+  async getVoiceData(sessionId: string, createTime: number, candidates: string[], svrId: string | number = 0): Promise<{ success: boolean; hex?: string; error?: string }> {
+    if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
+    if (!this.wcdbGetVoiceData) return { success: false, error: '当前 DLL 版本不支持获取语音数据' }
+    try {
+      const outPtr = [null as any]
+      const result = this.wcdbGetVoiceData(this.handle, sessionId, createTime, BigInt(svrId || 0), JSON.stringify(candidates), outPtr)
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `获取语音数据失败: ${result}` }
+      }
+      const hex = this.decodeJsonPtr(outPtr[0])
+      if (hex === null) return { success: false, error: '解析语音数据失败' }
+      return { success: true, hex: hex || undefined }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+}

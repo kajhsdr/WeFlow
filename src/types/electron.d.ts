@@ -94,8 +94,9 @@ export interface ElectronAPI {
       error?: string
     }>
     getImageData: (sessionId: string, msgId: string) => Promise<{ success: boolean; data?: string; error?: string }>
-    getVoiceData: (sessionId: string, msgId: string) => Promise<{ success: boolean; data?: string; error?: string }>
+    getVoiceData: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number) => Promise<{ success: boolean; data?: string; error?: string }>
     getVoiceTranscript: (sessionId: string, msgId: string) => Promise<{ success: boolean; transcript?: string; error?: string }>
+    onVoiceTranscriptPartial: (callback: (payload: { msgId: string; text: string }) => void) => () => void
   }
 
   image: {
@@ -297,8 +298,8 @@ export interface ElectronAPI {
     }>
   }
   whisper: {
-    downloadModel: (payload: { modelName: string; downloadDir?: string; source?: string }) => Promise<{ success: boolean; path?: string; error?: string }>
-    getModelStatus: (payload: { modelName: string; downloadDir?: string }) => Promise<{ success: boolean; exists?: boolean; path?: string; sizeBytes?: number; error?: string }>
+    downloadModel: () => Promise<{ success: boolean; modelPath?: string; tokensPath?: string; error?: string }>
+    getModelStatus: () => Promise<{ success: boolean; exists?: boolean; modelPath?: string; tokensPath?: string; sizeBytes?: number; error?: string }>
     onDownloadProgress: (callback: (payload: { modelName: string; downloadedBytes: number; totalBytes?: number; percent?: number }) => void) => () => void
   }
 }
