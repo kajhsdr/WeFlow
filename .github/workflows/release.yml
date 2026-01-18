@@ -44,21 +44,22 @@ jobs:
         uses: mikepenz/release-changelog-builder-action@v4
         with:
           outputFile: "release-notes.md"
+          commitMode: true
           configurationJson: |
             {
               "template": "# ${{ github.ref_name }} 更新日志\n\n{{CHANGELOG}}\n\n---\n> 此更新由系统自动构建",
               "categories": [
                 {
                   "title": "##  新功能",
-                  "filter": { "pattern": "^feat.*:.*", "flags": "i" }
+                  "filter": { "pattern": "^feat.*", "flags": "i" }
                 },
                 {
                   "title": "##  修复",
-                  "filter": { "pattern": "^fix.*:.*", "flags": "i" }
+                  "filter": { "pattern": "^fix.*", "flags": "i" }
                 },
                 {
                   "title": "##  性能与维护",
-                  "filter": { "pattern": "^(chore|docs|perf|refactor|ci|style|test).*:.*", "flags": "i" }
+                  "filter": { "pattern": "^(chore|docs|perf|refactor|ci|style|test).*", "flags": "i" }
                 },
                 {
                   "title": "##  其他改动",
@@ -66,7 +67,6 @@ jobs:
                 }
               ],
               "ignore_labels": [],
-              "commitMode": true,
               "empty_summary": "## 更新详情\n- 常规代码优化与维护"
             }
         env:
