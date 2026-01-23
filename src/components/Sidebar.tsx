@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { Home, MessageSquare, BarChart3, Users, FileText, Database, Settings, ChevronLeft, ChevronRight, Download, Bot } from 'lucide-react'
+import { Home, MessageSquare, BarChart3, Users, FileText, Database, Settings, ChevronLeft, ChevronRight, Download, Bot, Aperture } from 'lucide-react'
 import './Sidebar.scss'
 
 function Sidebar() {
@@ -32,6 +32,16 @@ function Sidebar() {
         >
           <span className="nav-icon"><MessageSquare size={20} /></span>
           <span className="nav-label">聊天</span>
+        </NavLink>
+
+        {/* 朋友圈 */}
+        <NavLink
+          to="/sns"
+          className={`nav-item ${isActive('/sns') ? 'active' : ''}`}
+          title={collapsed ? '朋友圈' : undefined}
+        >
+          <span className="nav-icon"><Aperture size={20} /></span>
+          <span className="nav-label">朋友圈</span>
         </NavLink>
 
 

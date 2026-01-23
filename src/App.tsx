@@ -16,6 +16,7 @@ import DataManagementPage from './pages/DataManagementPage'
 import SettingsPage from './pages/SettingsPage'
 import ExportPage from './pages/ExportPage'
 import VideoWindow from './pages/VideoWindow'
+import SnsPage from './pages/SnsPage'
 
 import { useAppStore } from './stores/appStore'
 import { themes, useThemeStore, type ThemeId } from './stores/themeStore'
@@ -202,10 +203,22 @@ function App() {
             }
           } else {
             console.log('自动连接失败:', result.error)
+            // 如果错误信息包含 VC++ 或 DLL 相关内容，不清除配置，只提示用户
+            // 其他错误可能需要重新配置
+            const errorMsg = result.error || ''
+            if (errorMsg.includes('Visual C++') ||
+              errorMsg.includes('DLL') ||
+              errorMsg.includes('Worker') ||
+              errorMsg.includes('126') ||
+              errorMsg.includes('模块')) {
+              console.warn('检测到可能的运行时依赖问题:', errorMsg)
+              // 不清除配置，让用户安装 VC++ 后重试
+            }
           }
         }
       } catch (e) {
         console.error('自动连接出错:', e)
+        // 捕获异常但不清除配置，防止循环重新引导
       }
     }
 
@@ -324,6 +337,7 @@ function App() {
               <Route path="/data-management" element={<DataManagementPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/export" element={<ExportPage />} />
+              <Route path="/sns" element={<SnsPage />} />
             </Routes>
           </RouteGuard>
         </main>

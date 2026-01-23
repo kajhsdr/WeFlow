@@ -116,6 +116,9 @@ if (parentPort) {
                         console.error('[wcdbWorker] getVoiceData failed:', result.error)
                     }
                     break
+                case 'getSnsTimeline':
+                    result = await core.getSnsTimeline(payload.limit, payload.offset, payload.usernames, payload.keyword, payload.startTime, payload.endTime)
+                    break
                 default:
                     result = { success: false, error: `Unknown method: ${type}` }
             }

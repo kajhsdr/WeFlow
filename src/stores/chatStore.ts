@@ -6,25 +6,26 @@ export interface ChatState {
   isConnected: boolean
   isConnecting: boolean
   connectionError: string | null
-  
+
   // 会话列表
   sessions: ChatSession[]
   filteredSessions: ChatSession[]
   currentSessionId: string | null
   isLoadingSessions: boolean
-  
+
   // 消息
   messages: Message[]
   isLoadingMessages: boolean
   isLoadingMore: boolean
   hasMoreMessages: boolean
-  
+  hasMoreLater: boolean
+
   // 联系人缓存
   contacts: Map<string, Contact>
-  
+
   // 搜索
   searchKeyword: string
-  
+
   // 操作
   setConnected: (connected: boolean) => void
   setConnecting: (connecting: boolean) => void
@@ -38,6 +39,7 @@ export interface ChatState {
   setLoadingMessages: (loading: boolean) => void
   setLoadingMore: (loading: boolean) => void
   setHasMoreMessages: (hasMore: boolean) => void
+  setHasMoreLater: (hasMore: boolean) => void
   setContacts: (contacts: Contact[]) => void
   addContact: (contact: Contact) => void
   setSearchKeyword: (keyword: string) => void
@@ -56,48 +58,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isLoadingMessages: false,
   isLoadingMore: false,
   hasMoreMessages: true,
+  hasMoreLater: false,
   contacts: new Map(),
   searchKeyword: '',
 
   setConnected: (connected) => set({ isConnected: connected }),
   setConnecting: (connecting) => set({ isConnecting: connecting }),
   setConnectionError: (error) => set({ connectionError: error }),
-  
+
   setSessions: (sessions) => set({ sessions, filteredSessions: sessions }),
   setFilteredSessions: (sessions) => set({ filteredSessions: sessions }),
-  
-  setCurrentSession: (sessionId) => set({ 
+
+  setCurrentSession: (sessionId) => set({
     currentSessionId: sessionId,
     messages: [],
-    hasMoreMessages: true
+    hasMoreMessages: true,
+    hasMoreLater: false
   }),
-  
+
   setLoadingSessions: (loading) => set({ isLoadingSessions: loading }),
-  
+
   setMessages: (messages) => set({ messages }),
-  
+
   appendMessages: (newMessages, prepend = false) => set((state) => ({
-    messages: prepend 
+    messages: prepend
       ? [...newMessages, ...state.messages]
       : [...state.messages, ...newMessages]
   })),
-  
+
   setLoadingMessages: (loading) => set({ isLoadingMessages: loading }),
   setLoadingMore: (loading) => set({ isLoadingMore: loading }),
   setHasMoreMessages: (hasMore) => set({ hasMoreMessages: hasMore }),
-  
-  setContacts: (contacts) => set({ 
-    contacts: new Map(contacts.map(c => [c.username, c])) 
+  setHasMoreLater: (hasMore) => set({ hasMoreLater: hasMore }),
+
+  setContacts: (contacts) => set({
+    contacts: new Map(contacts.map(c => [c.username, c]))
   }),
-  
+
   addContact: (contact) => set((state) => {
     const newContacts = new Map(state.contacts)
     newContacts.set(contact.username, contact)
     return { contacts: newContacts }
   }),
-  
+
   setSearchKeyword: (keyword) => set({ searchKeyword: keyword }),
-  
+
   reset: () => set({
     isConnected: false,
     isConnecting: false,
@@ -110,6 +115,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     isLoadingMessages: false,
     isLoadingMore: false,
     hasMoreMessages: true,
+    hasMoreLater: false,
     contacts: new Map(),
     searchKeyword: ''
   })

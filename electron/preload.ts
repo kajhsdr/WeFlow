@@ -98,8 +98,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSessions: () => ipcRenderer.invoke('chat:getSessions'),
     enrichSessionsContactInfo: (usernames: string[]) =>
       ipcRenderer.invoke('chat:enrichSessionsContactInfo', usernames),
-    getMessages: (sessionId: string, offset?: number, limit?: number) =>
-      ipcRenderer.invoke('chat:getMessages', sessionId, offset, limit),
+    getMessages: (sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) =>
+      ipcRenderer.invoke('chat:getMessages', sessionId, offset, limit, startTime, endTime, ascending),
     getLatestMessages: (sessionId: string, limit?: number) =>
       ipcRenderer.invoke('chat:getLatestMessages', sessionId, limit),
     getContact: (username: string) => ipcRenderer.invoke('chat:getContact', username),
@@ -191,7 +191,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     exportSessions: (sessionIds: string[], outputDir: string, options: any) =>
       ipcRenderer.invoke('export:exportSessions', sessionIds, outputDir, options),
     exportSession: (sessionId: string, outputPath: string, options: any) =>
-      ipcRenderer.invoke('export:exportSession', sessionId, outputPath, options)
+      ipcRenderer.invoke('export:exportSession', sessionId, outputPath, options),
+    onProgress: (callback: (payload: { current: number; total: number; currentSession: string; phase: string }) => void) => {
+      ipcRenderer.on('export:progress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('export:progress')
+    }
   },
 
   whisper: {
@@ -203,5 +207,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('whisper:downloadProgress', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('whisper:downloadProgress')
     }
+  },
+
+  // 朋友圈
+  sns: {
+    getTimeline: (limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('sns:getTimeline', limit, offset, usernames, keyword, startTime, endTime)
   }
 })

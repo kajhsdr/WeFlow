@@ -7,6 +7,7 @@ import { getEmojiPath } from 'wechat-emojis'
 import { ImagePreview } from '../components/ImagePreview'
 import { VoiceTranscribeDialog } from '../components/VoiceTranscribeDialog'
 import { AnimatedStreamingText } from '../components/AnimatedStreamingText'
+import JumpToDateDialog from '../components/JumpToDateDialog'
 import * as configService from '../services/config'
 import './ChatPage.scss'
 
@@ -132,15 +133,25 @@ function ChatPage(_props: ChatPageProps) {
     setLoadingMessages,
     setLoadingMore,
     setHasMoreMessages,
+    hasMoreLater,
+    setHasMoreLater,
     setSearchKeyword
   } = useChatStore()
 
   const messageListRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const sidebarRef = useRef<HTMLDivElement>(null)
+
+  const getMessageKey = useCallback((msg: Message): string => {
+    if (msg.localId && msg.localId > 0) return `l:${msg.localId}`
+    return `t:${msg.createTime}:${msg.sortSeq || 0}:${msg.serverId || 0}`
+  }, [])
   const initialRevealTimerRef = useRef<number | null>(null)
   const sessionListRef = useRef<HTMLDivElement>(null)
   const [currentOffset, setCurrentOffset] = useState(0)
+  const [jumpStartTime, setJumpStartTime] = useState(0)
+  const [jumpEndTime, setJumpEndTime] = useState(0)
+  const [showJumpDialog, setShowJumpDialog] = useState(false)
   const [myAvatarUrl, setMyAvatarUrl] = useState<string | undefined>(undefined)
   const [myWxid, setMyWxid] = useState<string | undefined>(undefined)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
@@ -477,6 +488,9 @@ function ChatPage(_props: ChatPageProps) {
 
   // 刷新会话列表
   const handleRefresh = async () => {
+    setJumpStartTime(0)
+    setJumpEndTime(0)
+    setHasMoreLater(false)
     await loadSessions({ silent: true })
   }
 
@@ -484,6 +498,9 @@ function ChatPage(_props: ChatPageProps) {
   const [isRefreshingMessages, setIsRefreshingMessages] = useState(false)
   const handleRefreshMessages = async () => {
     if (!currentSessionId || isRefreshingMessages) return
+    setJumpStartTime(0)
+    setJumpEndTime(0)
+    setHasMoreLater(false)
     setIsRefreshingMessages(true)
     try {
       // 获取最新消息并增量添加
@@ -518,7 +535,7 @@ function ChatPage(_props: ChatPageProps) {
   }
 
   // 加载消息
-  const loadMessages = async (sessionId: string, offset = 0) => {
+  const loadMessages = async (sessionId: string, offset = 0, startTime = 0, endTime = 0) => {
     const listEl = messageListRef.current
     const session = sessionMapRef.current.get(sessionId)
     const unreadCount = session?.unreadCount ?? 0
@@ -535,7 +552,7 @@ function ChatPage(_props: ChatPageProps) {
     const firstMsgEl = listEl?.querySelector('.message-wrapper') as HTMLElement | null
 
     try {
-      const result = await window.electronAPI.chat.getMessages(sessionId, offset, messageLimit)
+      const result = await window.electronAPI.chat.getMessages(sessionId, offset, messageLimit, startTime, endTime)
       if (result.success && result.messages) {
         if (offset === 0) {
           setMessages(result.messages)
@@ -601,6 +618,14 @@ function ChatPage(_props: ChatPageProps) {
           }
         }
         setHasMoreMessages(result.hasMore ?? false)
+        // 如果是按 endTime 跳转加载，且结果刚好满批，可能后面（更晚）还有消息
+        if (offset === 0) {
+          if (endTime > 0) {
+            setHasMoreLater(true)
+          } else {
+            setHasMoreLater(false)
+          }
+        }
         setCurrentOffset(offset + result.messages.length)
       } else if (!result.success) {
         setConnectionError(result.error || '加载消息失败')
@@ -616,12 +641,41 @@ function ChatPage(_props: ChatPageProps) {
     }
   }
 
+  // 加载更晚的消息
+  const loadLaterMessages = useCallback(async () => {
+    if (!currentSessionId || isLoadingMore || isLoadingMessages || messages.length === 0) return
+
+    setLoadingMore(true)
+    try {
+      const lastMsg = messages[messages.length - 1]
+      // 从最后一条消息的时间开始往后找
+      const result = await window.electronAPI.chat.getMessages(currentSessionId, 0, 50, lastMsg.createTime, 0, true)
+
+      if (result.success && result.messages) {
+        // 过滤掉已经在列表中的重复消息
+        const existingKeys = messageKeySetRef.current
+        const newMsgs = result.messages.filter(m => !existingKeys.has(getMessageKey(m)))
+
+        if (newMsgs.length > 0) {
+          appendMessages(newMsgs, false)
+        }
+        setHasMoreLater(result.hasMore ?? false)
+      }
+    } catch (e) {
+      console.error('加载后续消息失败:', e)
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [currentSessionId, isLoadingMore, isLoadingMessages, messages, getMessageKey, appendMessages, setHasMoreLater, setLoadingMore])
+
   // 选择会话
   const handleSelectSession = (session: ChatSession) => {
     if (session.username === currentSessionId) return
     setCurrentSession(session.username)
     setCurrentOffset(0)
-    loadMessages(session.username, 0)
+    setJumpStartTime(0)
+    setJumpEndTime(0)
+    loadMessages(session.username, 0, 0, 0)
     // 重置详情面板
     setSessionDetail(null)
     if (showDetailPanel) {
@@ -678,16 +732,21 @@ function ChatPage(_props: ChatPageProps) {
       if (!isLoadingMore && !isLoadingMessages && hasMoreMessages && currentSessionId) {
         const threshold = clientHeight * 0.3
         if (scrollTop < threshold) {
-          loadMessages(currentSessionId, currentOffset)
+          loadMessages(currentSessionId, currentOffset, jumpStartTime, jumpEndTime)
+        }
+      }
+
+      // 预加载更晚的消息
+      if (!isLoadingMore && !isLoadingMessages && hasMoreLater && currentSessionId) {
+        const threshold = clientHeight * 0.3
+        const distanceFromBottom = scrollHeight - scrollTop - clientHeight
+        if (distanceFromBottom < threshold) {
+          loadLaterMessages()
         }
       }
     })
-  }, [isLoadingMore, isLoadingMessages, hasMoreMessages, currentSessionId, currentOffset, loadMessages])
+  }, [isLoadingMore, isLoadingMessages, hasMoreMessages, hasMoreLater, currentSessionId, currentOffset, jumpStartTime, jumpEndTime, loadMessages, loadLaterMessages])
 
-  const getMessageKey = useCallback((msg: Message): string => {
-    if (msg.localId && msg.localId > 0) return `l:${msg.localId}`
-    return `t:${msg.createTime}:${msg.sortSeq || 0}:${msg.serverId || 0}`
-  }, [])
 
   const isSameSession = useCallback((prev: ChatSession, next: ChatSession): boolean => {
     return (
@@ -1103,6 +1162,25 @@ function ChatPage(_props: ChatPageProps) {
               </div>
               <div className="header-actions">
                 <button
+                  className="icon-btn jump-to-time-btn"
+                  onClick={() => setShowJumpDialog(true)}
+                  title="跳转到指定时间"
+                >
+                  <Calendar size={18} />
+                </button>
+                <JumpToDateDialog
+                  isOpen={showJumpDialog}
+                  onClose={() => setShowJumpDialog(false)}
+                  onSelect={(date) => {
+                    if (!currentSessionId) return
+                    const end = Math.floor(date.setHours(23, 59, 59, 999) / 1000)
+                    setCurrentOffset(0)
+                    setJumpStartTime(0)
+                    setJumpEndTime(end)
+                    loadMessages(currentSessionId, 0, 0, end)
+                  }}
+                />
+                <button
                   className="icon-btn refresh-messages-btn"
                   onClick={handleRefreshMessages}
                   disabled={isRefreshingMessages || isLoadingMessages}
@@ -1176,6 +1254,19 @@ function ChatPage(_props: ChatPageProps) {
                     </div>
                   )
                 })}
+
+                {hasMoreLater && (
+                  <div className={`load-more-trigger later ${isLoadingMore ? 'loading' : ''}`}>
+                    {isLoadingMore ? (
+                      <>
+                        <Loader2 size={14} />
+                        <span>正在加载后续消息...</span>
+                      </>
+                    ) : (
+                      <span>向下滚动查看更新消息</span>
+                    )}
+                  </div>
+                )}
 
                 {/* 回到底部按钮 */}
                 <div className={`scroll-to-bottom ${showScrollToBottom ? 'show' : ''}`} onClick={scrollToBottom}>

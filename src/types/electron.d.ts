@@ -63,7 +63,7 @@ export interface ElectronAPI {
       contacts?: Record<string, { displayName?: string; avatarUrl?: string }>
       error?: string
     }>
-    getMessages: (sessionId: string, offset?: number, limit?: number) => Promise<{
+    getMessages: (sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) => Promise<{
       success: boolean;
       messages?: Message[];
       hasMore?: boolean;
@@ -314,11 +314,30 @@ export interface ElectronAPI {
       success: boolean
       error?: string
     }>
+    onProgress: (callback: (payload: ExportProgress) => void) => () => void
   }
   whisper: {
     downloadModel: () => Promise<{ success: boolean; modelPath?: string; tokensPath?: string; error?: string }>
     getModelStatus: () => Promise<{ success: boolean; exists?: boolean; modelPath?: string; tokensPath?: string; sizeBytes?: number; error?: string }>
     onDownloadProgress: (callback: (payload: { modelName: string; downloadedBytes: number; totalBytes?: number; percent?: number }) => void) => () => void
+  }
+  sns: {
+    getTimeline: (limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) => Promise<{
+      success: boolean
+      timeline?: Array<{
+        id: string
+        username: string
+        nickname: string
+        avatarUrl?: string
+        createTime: number
+        contentDesc: string
+        type?: number
+        media: Array<{ url: string; thumb: string }>
+        likes: Array<string>
+        comments: Array<{ id: string; nickname: string; content: string; refCommentId: string; refNickname?: string }>
+      }>
+      error?: string
+    }>
   }
 }
 
@@ -332,6 +351,15 @@ export interface ExportOptions {
   exportEmojis?: boolean
   exportVoiceAsText?: boolean
   excelCompactColumns?: boolean
+  txtColumns?: string[]
+  sessionLayout?: 'shared' | 'per-session'
+}
+
+export interface ExportProgress {
+  current: number
+  total: number
+  currentSession: string
+  phase: 'preparing' | 'exporting' | 'writing' | 'complete'
 }
 
 export interface WxidInfo {

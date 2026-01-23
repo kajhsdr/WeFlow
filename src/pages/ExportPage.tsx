@@ -22,6 +22,7 @@ interface ExportOptions {
   exportEmojis: boolean
   exportVoiceAsText: boolean
   excelCompactColumns: boolean
+  txtColumns: string[]
 }
 
 interface ExportResult {
@@ -31,7 +32,10 @@ interface ExportResult {
   error?: string
 }
 
+type SessionLayout = 'shared' | 'per-session'
+
 function ExportPage() {
+  const defaultTxtColumns = ['index', 'time', 'senderRole', 'messageType', 'content']
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [filteredSessions, setFilteredSessions] = useState<ChatSession[]>([])
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set())
@@ -44,6 +48,7 @@ function ExportPage() {
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [calendarDate, setCalendarDate] = useState(new Date())
   const [selectingStart, setSelectingStart] = useState(true)
+  const [showMediaLayoutPrompt, setShowMediaLayoutPrompt] = useState(false)
 
   const [options, setOptions] = useState<ExportOptions>({
     format: 'excel',
@@ -58,7 +63,8 @@ function ExportPage() {
     exportVoices: true,
     exportEmojis: true,
     exportVoiceAsText: true,
-    excelCompactColumns: true
+    excelCompactColumns: true,
+    txtColumns: defaultTxtColumns
   })
 
   const buildDateRangeFromPreset = (preset: string) => {
@@ -122,17 +128,20 @@ function ExportPage() {
         savedRange,
         savedMedia,
         savedVoiceAsText,
-        savedExcelCompactColumns
+        savedExcelCompactColumns,
+        savedTxtColumns
       ] = await Promise.all([
         configService.getExportDefaultFormat(),
         configService.getExportDefaultDateRange(),
         configService.getExportDefaultMedia(),
         configService.getExportDefaultVoiceAsText(),
-        configService.getExportDefaultExcelCompactColumns()
+        configService.getExportDefaultExcelCompactColumns(),
+        configService.getExportDefaultTxtColumns()
       ])
 
       const preset = savedRange || 'today'
       const rangeDefaults = buildDateRangeFromPreset(preset)
+      const txtColumns = savedTxtColumns && savedTxtColumns.length > 0 ? savedTxtColumns : defaultTxtColumns
 
       setOptions((prev) => ({
         ...prev,
@@ -141,7 +150,8 @@ function ExportPage() {
         dateRange: rangeDefaults.dateRange,
         exportMedia: savedMedia ?? false,
         exportVoiceAsText: savedVoiceAsText ?? true,
-        excelCompactColumns: savedExcelCompactColumns ?? true
+        excelCompactColumns: savedExcelCompactColumns ?? true,
+        txtColumns
       }))
     } catch (e) {
       console.error('加载导出默认设置失败:', e)
@@ -153,6 +163,19 @@ function ExportPage() {
     loadExportPath()
     loadExportDefaults()
   }, [loadSessions, loadExportPath, loadExportDefaults])
+
+  useEffect(() => {
+    const removeListener = window.electronAPI.export.onProgress?.((payload) => {
+      setExportProgress({
+        current: payload.current,
+        total: payload.total,
+        currentName: payload.currentSession
+      })
+    })
+    return () => {
+      removeListener?.()
+    }
+  }, [])
 
   useEffect(() => {
     if (!searchKeyword.trim()) {
@@ -199,7 +222,7 @@ function ExportPage() {
     }
   }
 
-  const startExport = async () => {
+  const runExport = async (sessionLayout: SessionLayout) => {
     if (selectedSessions.size === 0 || !exportFolder) return
 
     setIsExporting(true)
@@ -215,16 +238,18 @@ function ExportPage() {
         exportImages: options.exportMedia && options.exportImages,
         exportVoices: options.exportMedia && options.exportVoices,
         exportEmojis: options.exportMedia && options.exportEmojis,
-        exportVoiceAsText: options.exportVoiceAsText,  // 独立于 exportMedia
+        exportVoiceAsText: options.exportVoiceAsText,  // 即使不导出媒体，也可以导出语音转文字内容
         excelCompactColumns: options.excelCompactColumns,
+        txtColumns: options.txtColumns,
+        sessionLayout,
         dateRange: options.useAllTime ? null : options.dateRange ? {
           start: Math.floor(options.dateRange.start.getTime() / 1000),
-          // 将结束日期设置为当天的 23:59:59,以包含当天的所有消息
+          // 将结束日期设置为当天的 23:59:59，确保包含当天的所有记录
           end: Math.floor(new Date(options.dateRange.end.getFullYear(), options.dateRange.end.getMonth(), options.dateRange.end.getDate(), 23, 59, 59).getTime() / 1000)
         } : null
       }
 
-      if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel') {
+      if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel' || options.format === 'txt') {
         const result = await window.electronAPI.export.exportSessions(
           sessionList,
           exportFolder,
@@ -232,14 +257,26 @@ function ExportPage() {
         )
         setExportResult(result)
       } else {
-        setExportResult({ success: false, error: `${options.format.toUpperCase()} 格式导出功能开发中...` })
+        setExportResult({ success: false, error: `${options.format.toUpperCase()} 格式目前暂未实现，请选择其他格式。` })
       }
     } catch (e) {
-      console.error('导出失败:', e)
+      console.error('导出过程中发生异常:', e)
       setExportResult({ success: false, error: String(e) })
     } finally {
       setIsExporting(false)
     }
+  }
+
+  const startExport = () => {
+    if (selectedSessions.size === 0 || !exportFolder) return
+
+    if (options.exportMedia && selectedSessions.size > 1) {
+      setShowMediaLayoutPrompt(true)
+      return
+    }
+
+    const layout: SessionLayout = options.exportMedia ? 'per-session' : 'shared'
+    runExport(layout)
   }
 
   const getDaysInMonth = (date: Date) => {
@@ -599,6 +636,43 @@ function ExportPage() {
           </button>
         </div>
       </div>
+
+      {/* 媒体导出布局选择弹窗 */}
+      {showMediaLayoutPrompt && (
+        <div className="export-overlay" onClick={() => setShowMediaLayoutPrompt(false)}>
+          <div className="export-layout-modal" onClick={e => e.stopPropagation()}>
+            <h3>导出文件夹布局</h3>
+            <p className="layout-subtitle">检测到同时导出多个会话并包含媒体文件，请选择存放方式：</p>
+            <div className="layout-options">
+              <button
+                className="layout-option-btn primary"
+                onClick={() => {
+                  setShowMediaLayoutPrompt(false)
+                  runExport('shared')
+                }}
+              >
+                <span className="layout-title">所有会话在同一文件夹</span>
+                <span className="layout-desc">媒体会按会话名归档到 media 子目录</span>
+              </button>
+              <button
+                className="layout-option-btn"
+                onClick={() => {
+                  setShowMediaLayoutPrompt(false)
+                  runExport('per-session')
+                }}
+              >
+                <span className="layout-title">每个会话一个文件夹</span>
+                <span className="layout-desc">每个会话单独包含导出文件和媒体</span>
+              </button>
+            </div>
+            <div className="layout-actions">
+              <button className="layout-cancel-btn" onClick={() => setShowMediaLayoutPrompt(false)}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 导出进度弹窗 */}
       {isExporting && (

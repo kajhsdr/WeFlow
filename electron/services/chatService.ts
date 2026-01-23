@@ -74,7 +74,7 @@ const emojiDownloading: Map<string, Promise<string | null>> = new Map()
 class ChatService {
   private configService: ConfigService
   private connected = false
-  private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number }> = new Map()
+  private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number; startTime?: number; endTime?: number; ascending?: boolean }> = new Map()
   private readonly messageBatchDefault = 50
   private avatarCache: Map<string, ContactCacheEntry>
   private readonly avatarCacheTtlMs = 10 * 60 * 1000
@@ -326,7 +326,11 @@ class ChatService {
       // 检查缓存
       for (const username of usernames) {
         const cached = this.avatarCache.get(username)
-        if (cached && now - cached.updatedAt < this.avatarCacheTtlMs) {
+        // 如果缓存有效且有头像，直接使用；如果没有头像，也需要重新尝试获取
+        // 额外检查：如果头像是无效的 hex 格式（以 ffd8 开头），也需要重新获取
+        const isValidAvatar = cached?.avatarUrl && 
+          !cached.avatarUrl.includes('base64,ffd8') // 检测错误的 hex 格式
+        if (cached && now - cached.updatedAt < this.avatarCacheTtlMs && isValidAvatar) {
           result[username] = {
             displayName: cached.displayName,
             avatarUrl: cached.avatarUrl
@@ -343,9 +347,17 @@ class ChatService {
           wcdbService.getAvatarUrls(missing)
         ])
 
+        // 收集没有头像 URL 的用户名
+        const missingAvatars: string[] = []
+
         for (const username of missing) {
           const displayName = displayNames.success && displayNames.map ? displayNames.map[username] : undefined
-          const avatarUrl = avatarUrls.success && avatarUrls.map ? avatarUrls.map[username] : undefined
+          let avatarUrl = avatarUrls.success && avatarUrls.map ? avatarUrls.map[username] : undefined
+
+          // 如果没有头像 URL，记录下来稍后从 head_image.db 获取
+          if (!avatarUrl) {
+            missingAvatars.push(username)
+          }
 
           const cacheEntry: ContactCacheEntry = {
             displayName: displayName || username,
@@ -357,6 +369,23 @@ class ChatService {
           this.avatarCache.set(username, cacheEntry)
           updatedEntries[username] = cacheEntry
         }
+
+        // 从 head_image.db 获取缺失的头像
+        if (missingAvatars.length > 0) {
+          const headImageAvatars = await this.getAvatarsFromHeadImageDb(missingAvatars)
+          for (const username of missingAvatars) {
+            const avatarUrl = headImageAvatars[username]
+            if (avatarUrl) {
+              result[username].avatarUrl = avatarUrl
+              const cached = this.avatarCache.get(username)
+              if (cached) {
+                cached.avatarUrl = avatarUrl
+                updatedEntries[username] = cached
+              }
+            }
+          }
+        }
+
         if (Object.keys(updatedEntries).length > 0) {
           this.contactCacheService.setEntries(updatedEntries)
         }
@@ -366,6 +395,81 @@ class ChatService {
       console.error('ChatService: 补充联系人信息失败:', e)
       return { success: false, error: String(e) }
     }
+  }
+
+  /**
+   * 从 head_image.db 批量获取头像（转换为 base64 data URL）
+   */
+  private async getAvatarsFromHeadImageDb(usernames: string[]): Promise<Record<string, string>> {
+    const result: Record<string, string> = {}
+    if (usernames.length === 0) return result
+
+    try {
+      const dbPath = this.configService.get('dbPath')
+      const wxid = this.configService.get('myWxid')
+      if (!dbPath || !wxid) return result
+
+      const accountDir = this.resolveAccountDir(dbPath, wxid)
+      if (!accountDir) return result
+
+      // head_image.db 可能在不同位置
+      const headImageDbPaths = [
+        join(accountDir, 'db_storage', 'head_image', 'head_image.db'),
+        join(accountDir, 'db_storage', 'head_image.db'),
+        join(accountDir, 'head_image.db')
+      ]
+
+      let headImageDbPath: string | null = null
+      for (const path of headImageDbPaths) {
+        if (existsSync(path)) {
+          headImageDbPath = path
+          break
+        }
+      }
+
+      if (!headImageDbPath) return result
+
+      // 使用 wcdbService.execQuery 查询加密的 head_image.db
+      for (const username of usernames) {
+        try {
+          const escapedUsername = username.replace(/'/g, "''")
+          const queryResult = await wcdbService.execQuery(
+            'media',
+            headImageDbPath,
+            `SELECT image_buffer FROM head_image WHERE username = '${escapedUsername}' LIMIT 1`
+          )
+
+          if (queryResult.success && queryResult.rows && queryResult.rows.length > 0) {
+            const row = queryResult.rows[0] as any
+            if (row?.image_buffer) {
+              let base64Data: string
+              if (typeof row.image_buffer === 'string') {
+                // WCDB 返回的 BLOB 是十六进制字符串，需要转换为 base64
+                if (row.image_buffer.toLowerCase().startsWith('ffd8')) {
+                  const buffer = Buffer.from(row.image_buffer, 'hex')
+                  base64Data = buffer.toString('base64')
+                } else {
+                  base64Data = row.image_buffer
+                }
+              } else if (Buffer.isBuffer(row.image_buffer)) {
+                base64Data = row.image_buffer.toString('base64')
+              } else if (Array.isArray(row.image_buffer)) {
+                base64Data = Buffer.from(row.image_buffer).toString('base64')
+              } else {
+                continue
+              }
+              result[username] = `data:image/jpeg;base64,${base64Data}`
+            }
+          }
+        } catch {
+          // 静默处理单个用户的错误
+        }
+      }
+    } catch (e) {
+      console.error('从 head_image.db 获取头像失败:', e)
+    }
+
+    return result
   }
 
   /**
@@ -396,7 +500,10 @@ class ChatService {
   async getMessages(
     sessionId: string,
     offset: number = 0,
-    limit: number = 50
+    limit: number = 50,
+    startTime: number = 0,
+    endTime: number = 0,
+    ascending: boolean = false
   ): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; error?: string }> {
     try {
       const connectResult = await this.ensureConnected()
@@ -411,7 +518,14 @@ class ChatService {
       // 1. 没有游标状态
       // 2. offset 为 0 (重新加载会话)
       // 3. batchSize 改变
-      const needNewCursor = !state || offset === 0 || state.batchSize !== batchSize
+      // 4. startTime 改变
+      // 5. ascending 改变
+      const needNewCursor = !state ||
+        offset === 0 ||
+        state.batchSize !== batchSize ||
+        state.startTime !== startTime ||
+        state.endTime !== endTime ||
+        state.ascending !== ascending
 
       if (needNewCursor) {
         // 关闭旧游标
@@ -424,13 +538,16 @@ class ChatService {
         }
 
         // 创建新游标
-        const cursorResult = await wcdbService.openMessageCursor(sessionId, batchSize, false, 0, 0)
+        // 注意：WeFlow 数据库中的 create_time 是以秒为单位的
+        const beginTimestamp = startTime > 10000000000 ? Math.floor(startTime / 1000) : startTime
+        const endTimestamp = endTime > 10000000000 ? Math.floor(endTime / 1000) : endTime
+        const cursorResult = await wcdbService.openMessageCursor(sessionId, batchSize, ascending, beginTimestamp, endTimestamp)
         if (!cursorResult.success || !cursorResult.cursor) {
           console.error('[ChatService] 打开消息游标失败:', cursorResult.error)
           return { success: false, error: cursorResult.error || '打开消息游标失败' }
         }
 
-        state = { cursor: cursorResult.cursor, fetched: 0, batchSize }
+        state = { cursor: cursorResult.cursor, fetched: 0, batchSize, startTime, endTime, ascending }
         this.messageCursors.set(sessionId, state)
 
         // 如果需要跳过消息(offset > 0),逐批获取但不返回
@@ -1706,7 +1823,9 @@ class ChatService {
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) return null
       const cached = this.avatarCache.get(username)
-      if (cached && cached.avatarUrl && Date.now() - cached.updatedAt < this.avatarCacheTtlMs) {
+      // 检查缓存是否有效，且头像不是错误的 hex 格式
+      const isValidAvatar = cached?.avatarUrl && !cached.avatarUrl.includes('base64,ffd8')
+      if (cached && isValidAvatar && Date.now() - cached.updatedAt < this.avatarCacheTtlMs) {
         return { avatarUrl: cached.avatarUrl, displayName: cached.displayName }
       }
 
@@ -2979,10 +3098,26 @@ class ChatService {
 
   private resolveAccountDir(dbPath: string, wxid: string): string | null {
     const normalized = dbPath.replace(/[\\\\/]+$/, '')
+    
+    // 如果 dbPath 本身指向 db_storage 目录下的文件（如某个 .db 文件）
+    // 则向上回溯到账号目录
+    if (basename(normalized).toLowerCase() === 'db_storage') {
+      return dirname(normalized)
+    }
     const dir = dirname(normalized)
-    if (basename(normalized).toLowerCase() === 'db_storage') return dir
-    if (basename(dir).toLowerCase() === 'db_storage') return dirname(dir)
-    return dir // 兜底
+    if (basename(dir).toLowerCase() === 'db_storage') {
+      return dirname(dir)
+    }
+    
+    // 否则，dbPath 应该是数据库根目录（如 xwechat_files）
+    // 账号目录应该是 {dbPath}/{wxid}
+    const accountDirWithWxid = join(normalized, wxid)
+    if (existsSync(accountDirWithWxid)) {
+      return accountDirWithWxid
+    }
+    
+    // 兜底：返回 dbPath 本身（可能 dbPath 已经是账号目录）
+    return normalized
   }
 
   private async findDatFile(accountDir: string, baseName: string, sessionId?: string): Promise<string | null> {

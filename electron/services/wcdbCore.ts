@@ -1,6 +1,12 @@
 import { join, dirname, basename } from 'path'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
 
+// DLL 初始化错误信息，用于帮助用户诊断问题
+let lastDllInitError: string | null = null
+export function getLastDllInitError(): string | null {
+  return lastDllInitError
+}
+
 export class WcdbCore {
   private resourcesPath: string | null = null
   private userDataPath: string | null = null
@@ -49,6 +55,7 @@ export class WcdbCore {
   private wcdbGetEmoticonCdnUrl: any = null
   private wcdbGetDbStatus: any = null
   private wcdbGetVoiceData: any = null
+  private wcdbGetSnsTimeline: any = null
   private avatarUrlCache: Map<string, { url?: string; updatedAt: number }> = new Map()
   private readonly avatarCacheTtlMs = 10 * 60 * 1000
   private logTimer: NodeJS.Timeout | null = null
@@ -110,7 +117,8 @@ export class WcdbCore {
   private writeLog(message: string, force = false): void {
     if (!force && !this.isLogEnabled()) return
     const line = `[${new Date().toISOString()}] ${message}`
-    // 移除控制台日志，只写入文件
+    // 同时输出到控制台和文件
+    console.log('[WCDB]', message)
     try {
       const base = this.userDataPath || process.env.WCDB_LOG_DIR || process.cwd()
       const dir = join(base, 'logs')
@@ -206,6 +214,31 @@ export class WcdbCore {
       if (!existsSync(dllPath)) {
         console.error('WCDB DLL 不存在:', dllPath)
         return false
+      }
+
+      // 关键修复：显式预加载依赖库 WCDB.dll 和 SDL2.dll
+      // Windows 加载器默认不会查找子目录中的依赖，必须先将其加载到内存
+      // 这可以解决部分用户因为 VC++ 运行时或 DLL 依赖问题导致的闪退
+      const dllDir = dirname(dllPath)
+      const wcdbCorePath = join(dllDir, 'WCDB.dll')
+      if (existsSync(wcdbCorePath)) {
+        try {
+          this.koffi.load(wcdbCorePath)
+          this.writeLog('预加载 WCDB.dll 成功')
+        } catch (e) {
+          console.warn('预加载 WCDB.dll 失败(可能不是致命的):', e)
+          this.writeLog(`预加载 WCDB.dll 失败: ${String(e)}`)
+        }
+      }
+      const sdl2Path = join(dllDir, 'SDL2.dll')
+      if (existsSync(sdl2Path)) {
+        try {
+          this.koffi.load(sdl2Path)
+          this.writeLog('预加载 SDL2.dll 成功')
+        } catch (e) {
+          console.warn('预加载 SDL2.dll 失败(可能不是致命的):', e)
+          this.writeLog(`预加载 SDL2.dll 失败: ${String(e)}`)
+        }
       }
 
       this.lib = this.koffi.load(dllPath)
@@ -354,6 +387,13 @@ export class WcdbCore {
         this.wcdbGetVoiceData = null
       }
 
+      // wcdb_status wcdb_get_sns_timeline(wcdb_handle handle, int32_t limit, int32_t offset, const char* username, const char* keyword, int32_t start_time, int32_t end_time, char** out_json)
+      try {
+        this.wcdbGetSnsTimeline = this.lib.func('int32 wcdb_get_sns_timeline(int64 handle, int32 limit, int32 offset, const char* username, const char* keyword, int32 startTime, int32 endTime, _Out_ void** outJson)')
+      } catch {
+        this.wcdbGetSnsTimeline = null
+      }
+
       // 初始化
       const initResult = this.wcdbInit()
       if (initResult !== 0) {
@@ -362,9 +402,20 @@ export class WcdbCore {
       }
 
       this.initialized = true
+      lastDllInitError = null
       return true
     } catch (e) {
-      console.error('WCDB 初始化异常:', e)
+      const errorMsg = e instanceof Error ? e.message : String(e)
+      console.error('WCDB 初始化异常:', errorMsg)
+      this.writeLog(`WCDB 初始化异常: ${errorMsg}`, true)
+      lastDllInitError = errorMsg
+      // 检查是否是常见的 VC++ 运行时缺失错误
+      if (errorMsg.includes('126') || errorMsg.includes('找不到指定的模块') ||
+        errorMsg.includes('The specified module could not be found')) {
+        lastDllInitError = '可能缺少 Visual C++ 运行时库。请安装 Microsoft Visual C++ Redistributable (x64)。'
+      } else if (errorMsg.includes('193') || errorMsg.includes('不是有效的 Win32 应用程序')) {
+        lastDllInitError = 'DLL 架构不匹配。请确保使用 64 位版本的应用程序。'
+      }
       return false
     }
   }
@@ -382,10 +433,18 @@ export class WcdbCore {
         return { success: true, sessionCount: 0 }
       }
 
+      // 记录当前活动连接，用于在测试结束后恢复（避免影响聊天页等正在使用的连接）
+      const hadActiveConnection = this.handle !== null
+      const prevPath = this.currentPath
+      const prevKey = this.currentKey
+      const prevWxid = this.currentWxid
+
       if (!this.initialized) {
         const initOk = await this.initialize()
         if (!initOk) {
-          return { success: false, error: 'WCDB 初始化失败' }
+          // 返回更详细的错误信息，帮助用户诊断问题
+          const detailedError = lastDllInitError || 'WCDB 初始化失败'
+          return { success: false, error: detailedError }
         }
       }
 
@@ -424,8 +483,8 @@ export class WcdbCore {
         return { success: false, error: '无效的数据库句柄' }
       }
 
-      // 测试成功，使用 shutdown 清理所有资源（包括测试句柄）
-      // 这会中断当前活动连接，但 testConnection 本应该是独立测试
+      // 测试成功：使用 shutdown 清理资源（包括测试句柄）
+      // 注意：shutdown 会断开当前活动连接，因此需要在测试后尝试恢复之前的连接
       try {
         this.wcdbShutdown()
         this.handle = null
@@ -435,6 +494,15 @@ export class WcdbCore {
         this.initialized = false
       } catch (closeErr) {
         console.error('关闭测试数据库时出错:', closeErr)
+      }
+
+      // 恢复测试前的连接（如果之前有活动连接）
+      if (hadActiveConnection && prevPath && prevKey && prevWxid) {
+        try {
+          await this.open(prevPath, prevKey, prevWxid)
+        } catch {
+          // 恢复失败则保持断开，由调用方处理
+        }
       }
 
       return { success: true, sessionCount: 0 }
@@ -1325,6 +1393,34 @@ export class WcdbCore {
       const hex = this.decodeJsonPtr(outPtr[0])
       if (hex === null) return { success: false, error: '解析语音数据失败' }
       return { success: true, hex: hex || undefined }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async getSnsTimeline(limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number): Promise<{ success: boolean; timeline?: any[]; error?: string }> {
+    if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
+    if (!this.wcdbGetSnsTimeline) return { success: false, error: '当前 DLL 版本不支持获取朋友圈' }
+    try {
+      const outPtr = [null as any]
+      const usernamesJson = usernames && usernames.length > 0 ? JSON.stringify(usernames) : ''
+      const result = this.wcdbGetSnsTimeline(
+        this.handle,
+        limit,
+        offset,
+        usernamesJson,
+        keyword || '',
+        startTime || 0,
+        endTime || 0,
+        outPtr
+      )
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `获取朋友圈失败: ${result}` }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: '解析朋友圈数据失败' }
+      const timeline = JSON.parse(jsonStr)
+      return { success: true, timeline }
     } catch (e) {
       return { success: false, error: String(e) }
     }

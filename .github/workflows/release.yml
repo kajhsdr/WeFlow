@@ -16,7 +16,7 @@ jobs:
       - name: Check out git repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 
+          fetch-depth: 0
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -32,51 +32,20 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           echo "Syncing package.json version to $VERSION"
-          npm version $VERSION --no-git-tag-version
+          npm version $VERSION --no-git-tag-version --allow-same-version
 
       - name: Build Frontend & Type Check
         run: |
           npx tsc
           npx vite build
 
-      - name: Build Changelog
-        id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@v4
-        with:
-          outputFile: "release-notes.md"
-          configurationJson: |
-            {
-              "template": "# v${{ github.ref_name }} 更新日志\n\n{{CHANGELOG}}\n\n---\n> 此更新由系统自动构建",
-              "categories": [
-                {
-                  "title": "## 新功能",
-                  "filter": { "pattern": "^feat.*:.*", "flags": "i" }
-                },
-                {
-                  "title": "## 修复",
-                  "filter": { "pattern": "^fix.*:.*", "flags": "i" }
-                },
-                {
-                  "title": "## 性能与维护",
-                  "filter": { "pattern": "^(chore|docs|perf|refactor|ci|style|test).*:.*", "flags": "i" }
-                }
-              ],
-              "ignore_labels": [],
-              "commitMode": true,
-              "empty_summary": "## 更新详情\n- 常规代码优化与维护"
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check Changelog Content
+      - name: Inject Configuration
         shell: bash
         run: |
-          echo "=== RELEASE NOTES CONTENT START ==="
-          cat release-notes.md
-          echo "=== RELEASE NOTES CONTENT END ==="
+          npm pkg set build.releaseInfo.releaseNotes=$'仅适配微信 4.0 及以上版本\n\n修复了一些已知问题\n\n详情前往 Telegram 群查看'
 
       - name: Package and Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npx electron-builder --publish always -c.releaseInfo.releaseNotesFile=release-notes.md
+          npx electron-builder --publish always

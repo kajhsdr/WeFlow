@@ -489,8 +489,21 @@
       }
 
       .load-more-trigger {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 12px 0;
         color: var(--text-tertiary);
-        font-size: 12px;
+        font-size: 13px;
+
+        &.later {
+          padding: 24px 0 12px;
+        }
+
+        svg {
+          animation: spin 1s linear infinite;
+        }
       }
 
       .empty-chat {
@@ -1660,7 +1673,7 @@
   max-width: 100%;
   min-width: 0; // 允许收缩
   -webkit-app-region: no-drag;
-  
+
   // 让气泡宽度由内容决定，而不是被父容器撑开
   width: fit-content;
 }

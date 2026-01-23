@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, nativeTheme } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeTheme, session } from 'electron'
 import { Worker } from 'worker_threads'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { autoUpdater } from 'electron-updater'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -13,10 +13,11 @@ import { imagePreloadService } from './services/imagePreloadService'
 import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
 import { annualReportService } from './services/annualReportService'
-import { exportService, ExportOptions } from './services/exportService'
+import { exportService, ExportOptions, ExportProgress } from './services/exportService'
 import { KeyService } from './services/keyService'
 import { voiceTranscribeService } from './services/voiceTranscribeService'
 import { videoService } from './services/videoService'
+import { snsService } from './services/snsService'
 
 
 // 配置自动更新
@@ -27,6 +28,47 @@ const AUTO_UPDATE_ENABLED =
   process.env.AUTO_UPDATE_ENABLED === 'true' ||
   process.env.AUTO_UPDATE_ENABLED === '1' ||
   (process.env.AUTO_UPDATE_ENABLED == null && !process.env.VITE_DEV_SERVER_URL)
+
+// 使用白名单过滤 PATH，避免被第三方目录中的旧版 VC++ 运行库劫持。
+// 仅保留系统目录（Windows/System32/SysWOW64）和应用自身目录（可执行目录、resources）。
+function sanitizePathEnv() {
+  // 开发模式不做裁剪，避免影响本地工具链
+  if (process.env.VITE_DEV_SERVER_URL) return
+
+  const rawPath = process.env.PATH || process.env.Path
+  if (!rawPath) return
+
+  const sep = process.platform === 'win32' ? ';' : ':'
+  const parts = rawPath.split(sep).filter(Boolean)
+
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || ''
+  const safePrefixes = [
+    systemRoot,
+    systemRoot ? join(systemRoot, 'System32') : '',
+    systemRoot ? join(systemRoot, 'SysWOW64') : '',
+    dirname(process.execPath),
+    process.resourcesPath,
+    join(process.resourcesPath || '', 'resources')
+  ].filter(Boolean)
+
+  const normalize = (p: string) => p.replace(/\\/g, '/').toLowerCase()
+  const isSafe = (p: string) => {
+    const np = normalize(p)
+    return safePrefixes.some((prefix) => np.startsWith(normalize(prefix)))
+  }
+
+  const filtered = parts.filter(isSafe)
+  if (filtered.length !== parts.length) {
+    const removed = parts.filter((p) => !isSafe(p))
+    console.warn('[WeFlow] 使用白名单裁剪 PATH，移除目录:', removed)
+    const nextPath = filtered.join(sep)
+    process.env.PATH = nextPath
+    process.env.Path = nextPath
+  }
+}
+
+// 启动时立即清理 PATH，后续创建的 worker 也能继承安全的环境
+sanitizePathEnv()
 
 // 单例服务
 let configService: ConfigService | null = null
@@ -573,8 +615,8 @@ function registerIpcHandlers() {
     return chatService.enrichSessionsContactInfo(usernames)
   })
 
-  ipcMain.handle('chat:getMessages', async (_, sessionId: string, offset?: number, limit?: number) => {
-    return chatService.getMessages(sessionId, offset, limit)
+  ipcMain.handle('chat:getMessages', async (_, sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) => {
+    return chatService.getMessages(sessionId, offset, limit, startTime, endTime, ascending)
   })
 
   ipcMain.handle('chat:getLatestMessages', async (_, sessionId: string, limit?: number) => {
@@ -631,6 +673,10 @@ function registerIpcHandlers() {
     return chatService.getMessageById(sessionId, localId)
   })
 
+  ipcMain.handle('sns:getTimeline', async (_, limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) => {
+    return snsService.getTimeline(limit, offset, usernames, keyword, startTime, endTime)
+  })
+
   // 私聊克隆
 
 
@@ -646,8 +692,13 @@ function registerIpcHandlers() {
   })
 
   // 导出相关
-  ipcMain.handle('export:exportSessions', async (_, sessionIds: string[], outputDir: string, options: ExportOptions) => {
-    return exportService.exportSessions(sessionIds, outputDir, options)
+  ipcMain.handle('export:exportSessions', async (event, sessionIds: string[], outputDir: string, options: ExportOptions) => {
+    const onProgress = (progress: ExportProgress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('export:progress', progress)
+      }
+    }
+    return exportService.exportSessions(sessionIds, outputDir, options, onProgress)
   })
 
   ipcMain.handle('export:exportSession', async (_, sessionId: string, outputPath: string, options: ExportOptions) => {
@@ -930,6 +981,17 @@ app.whenReady().then(() => {
   if (!onboardingDone) {
     createOnboardingWindow()
   }
+
+  // 解决朋友圈图片无法加载问题（添加 Referer）
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    {
+      urls: ['*://*.qpic.cn/*', '*://*.wx.qq.com/*']
+    },
+    (details, callback) => {
+      details.requestHeaders['Referer'] = 'https://wx.qq.com/'
+      callback({ requestHeaders: details.requestHeaders })
+    }
+  )
 
   // 启动时检测更新
   checkForUpdatesOnStartup()
