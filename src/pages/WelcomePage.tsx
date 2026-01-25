@@ -453,10 +453,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
                   ⚠️ 目录路径不可包含中文，如有中文请先在微信中迁移至全英文目录
                 </div>
               </div>
-              <div className="field-hint" style={{ color: '#ff6b6b', fontSize: '14px', fontWeight: '500' }}>请选择微信-设置-存储位置对应的目录</div>
-              <div className="field-hint" style={{ color: '#ff6b6b', marginTop: '4px', fontSize: '14px', fontWeight: '500' }}>⚠️ 目录路径不可包含中文，如有中文请去微信-设置-存储位置点击更改，迁移至全英文目录</div>
-            </div>
-          )}
+            )}
 
             {currentStep.id === 'cache' && (
               <div className="form-group">
@@ -557,11 +554,11 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
                   {isFetchingImageKey ? '扫描中...' : '自动获取图片密钥'}
                 </button>
 
-              {dbKeyStatus && <div className="field-hint status-text">{dbKeyStatus}</div>}
-              <div className="field-hint">获取密钥会自动识别最近登录的账号</div>
-              <div className="field-hint">点击自动获取后微信将重新启动，当页面提示<span style={{ color: 'red' }}>hook安装成功，现在登录微信</span>后再点击登录</div>
-            </div>
-          )}
+                {imageKeyStatus && <div className="status-message">{imageKeyStatus}</div>}
+                <div className="field-hint">请在微信中打开几张图片后再点击获取</div>
+              </div>
+            )}
+          </div>
 
           {error && <div className="error-message">{error}</div>}
 
