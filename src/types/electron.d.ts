@@ -1,4 +1,4 @@
-import type { ChatSession, Message, Contact } from './models'
+import type { ChatSession, Message, Contact, ContactInfo } from './models'
 
 export interface ElectronAPI {
   window: {
@@ -76,6 +76,11 @@ export interface ElectronAPI {
     }>
     getContact: (username: string) => Promise<Contact | null>
     getContactAvatar: (username: string) => Promise<{ avatarUrl?: string; displayName?: string } | null>
+    getContacts: () => Promise<{
+      success: boolean
+      contacts?: ContactInfo[]
+      error?: string
+    }>
     getMyAvatarUrl: () => Promise<{ success: boolean; avatarUrl?: string; error?: string }>
     downloadEmoji: (cdnUrl: string, md5?: string) => Promise<{ success: boolean; localPath?: string; error?: string }>
     close: () => Promise<boolean>
@@ -315,6 +320,11 @@ export interface ElectronAPI {
       success: boolean
       error?: string
     }>
+    exportContacts: (outputDir: string, options: { format: 'json' | 'csv' | 'vcf'; exportAvatars: boolean; contactTypes: { friends: boolean; groups: boolean; officials: boolean } }) => Promise<{
+      success: boolean
+      successCount?: number
+      error?: string
+    }>
     onProgress: (callback: (payload: ExportProgress) => void) => () => void
   }
   whisper: {
@@ -373,6 +383,7 @@ export interface ExportOptions {
   txtColumns?: string[]
   sessionLayout?: 'shared' | 'per-session'
   displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
+  exportConcurrency?: number
 }
 
 export interface ExportProgress {

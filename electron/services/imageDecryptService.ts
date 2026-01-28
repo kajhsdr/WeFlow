@@ -415,8 +415,14 @@ export class ImageDecryptService {
           if (imageDatName) this.cacheDatPath(accountDir, imageDatName, hardlinkPath)
           return hardlinkPath
         }
-        // hardlink 找到的是缩略图，但要求高清图，直接返回 null，不再搜索
+        // hardlink 找到的是缩略图，但要求高清图：尝试同目录查找高清变体
         if (!allowThumbnail && isThumb) {
+          const hdPath = this.findHdVariantInSameDir(hardlinkPath)
+          if (hdPath) {
+            this.cacheDatPath(accountDir, imageMd5, hdPath)
+            if (imageDatName) this.cacheDatPath(accountDir, imageDatName, hdPath)
+            return hdPath
+          }
           return null
         }
       }
@@ -432,6 +438,11 @@ export class ImageDecryptService {
             return fallbackPath
           }
           if (!allowThumbnail && isThumb) {
+            const hdPath = this.findHdVariantInSameDir(fallbackPath)
+            if (hdPath) {
+              this.cacheDatPath(accountDir, imageDatName, hdPath)
+              return hdPath
+            }
             return null
           }
         }
@@ -449,15 +460,20 @@ export class ImageDecryptService {
           this.cacheDatPath(accountDir, imageDatName, hardlinkPath)
           return hardlinkPath
         }
-        // hardlink 找到的是缩略图，但要求高清图，直接返回 null
+        // hardlink 找到的是缩略图，但要求高清图：尝试同目录查找高清变体
         if (!allowThumbnail && isThumb) {
+          const hdPath = this.findHdVariantInSameDir(hardlinkPath)
+          if (hdPath) {
+            this.cacheDatPath(accountDir, imageDatName, hdPath)
+            return hdPath
+          }
           return null
         }
       }
       this.logInfo('[ImageDecrypt] hardlink miss (datName)', { imageDatName })
     }
 
-    // 如果要求高清图但 hardlink 没找到，也不要搜索了（搜索太慢）
+    // 如果要求高清图但 hardlink 没找到，也不要搜索全盘了（搜索太慢）
     if (!allowThumbnail) {
       return null
     }
@@ -467,6 +483,9 @@ export class ImageDecryptService {
       const cached = this.resolvedCache.get(imageDatName)
       if (cached && existsSync(cached)) {
         if (allowThumbnail || !this.isThumbnailPath(cached)) return cached
+        // 缓存的是缩略图，尝试同目录找高清变体
+        const hdPath = this.findHdVariantInSameDir(cached)
+        if (hdPath) return hdPath
       }
     }
 
@@ -509,6 +528,38 @@ export class ImageDecryptService {
 
     if (!imageDatName) return null
     return this.searchDatFile(accountDir, imageDatName, true, true)
+  }
+
+  /**
+   * 在同目录中尝试查找高清图变体
+   * 缩略图: xxx_t.dat / xxx.t.dat -> 高清图: xxx_h.dat / xxx.h.dat / xxx.dat
+   */
+  private findHdVariantInSameDir(thumbPath: string): string | null {
+    try {
+      const dir = dirname(thumbPath)
+      const fileName = basename(thumbPath).toLowerCase()
+
+      let baseName = fileName
+      if (baseName.endsWith('_t.dat')) {
+        baseName = baseName.slice(0, -6)
+      } else if (baseName.endsWith('.t.dat')) {
+        baseName = baseName.slice(0, -6)
+      } else {
+        return null
+      }
+
+      const variants = [
+        `${baseName}_h.dat`,
+        `${baseName}.h.dat`,
+        `${baseName}.dat`
+      ]
+
+      for (const variant of variants) {
+        const candidate = join(dir, variant)
+        if (existsSync(candidate)) return candidate
+      }
+    } catch { }
+    return null
   }
 
   private async checkHasUpdate(

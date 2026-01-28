@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { Home, MessageSquare, BarChart3, Users, FileText, Database, Settings, ChevronLeft, ChevronRight, Download, Bot, Aperture } from 'lucide-react'
+import { Home, MessageSquare, BarChart3, Users, FileText, Database, Settings, ChevronLeft, ChevronRight, Download, Bot, Aperture, UserCircle } from 'lucide-react'
 import './Sidebar.scss'
 
 function Sidebar() {
@@ -44,7 +44,15 @@ function Sidebar() {
           <span className="nav-label">朋友圈</span>
         </NavLink>
 
-
+        {/* 通讯录 */}
+        <NavLink
+          to="/contacts"
+          className={`nav-item ${isActive('/contacts') ? 'active' : ''}`}
+          title={collapsed ? '通讯录' : undefined}
+        >
+          <span className="nav-icon"><UserCircle size={20} /></span>
+          <span className="nav-label">通讯录</span>
+        </NavLink>
 
         {/* 私聊分析 */}
         <NavLink

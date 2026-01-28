@@ -67,6 +67,15 @@ export interface Contact {
   nickName: string
 }
 
+export interface ContactInfo {
+  username: string
+  displayName: string
+  remark?: string
+  nickname?: string
+  avatarUrl?: string
+  type: 'friend' | 'group' | 'official' | 'other'
+}
+
 // 表情包缓存
 const emojiCache: Map<string, string> = new Map()
 const emojiDownloading: Map<string, Promise<string | null>> = new Map()
@@ -491,6 +500,153 @@ class ChatService {
       }
     } catch (e) {
       console.error('ChatService: 获取联系人信息失败:', e)
+    }
+  }
+
+  /**
+   * 获取通讯录列表
+   */
+  async getContacts(): Promise<{ success: boolean; contacts?: ContactInfo[]; error?: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) {
+        return { success: false, error: connectResult.error }
+      }
+
+      // 使用execQuery直接查询加密的contact.db
+      // kind='contact', path=null表示使用已打开的contact.db
+      const contactQuery = `
+        SELECT username, remark, nick_name, alias, local_type
+        FROM contact
+      `
+
+      console.log('查询contact.db...')
+      const contactResult = await wcdbService.execQuery('contact', null, contactQuery)
+
+      if (!contactResult.success || !contactResult.rows) {
+        console.error('查询联系人失败:', contactResult.error)
+        return { success: false, error: contactResult.error || '查询联系人失败' }
+      }
+
+      console.log('查询到', contactResult.rows.length, '条联系人记录')
+      const rows = contactResult.rows as Record<string, any>[]
+
+      // 调试：显示前5条数据样本
+      console.log('📋 前5条数据样本:')
+      rows.slice(0, 5).forEach((row, idx) => {
+        console.log(`  ${idx + 1}. username: ${row.username}, local_type: ${row.local_type}, remark: ${row.remark || '无'}, nick_name: ${row.nick_name || '无'}`)
+      })
+
+      // 调试：统计local_type分布
+      const localTypeStats = new Map<number, number>()
+      rows.forEach(row => {
+        const lt = row.local_type || 0
+        localTypeStats.set(lt, (localTypeStats.get(lt) || 0) + 1)
+      })
+      console.log('📊 local_type分布:', Object.fromEntries(localTypeStats))
+
+      // 获取会话表的最后联系时间用于排序
+      const lastContactTimeMap = new Map<string, number>()
+      const sessionResult = await wcdbService.getSessions()
+      if (sessionResult.success && sessionResult.sessions) {
+        for (const session of sessionResult.sessions as any[]) {
+          const username = session.username || session.user_name || session.userName || ''
+          const timestamp = session.sort_timestamp || session.sortTimestamp || 0
+          if (username && timestamp) {
+            lastContactTimeMap.set(username, timestamp)
+          }
+        }
+      }
+
+      // 转换为ContactInfo
+      const contacts: (ContactInfo & { lastContactTime: number })[] = []
+
+      for (const row of rows) {
+        const username = row.username || ''
+
+        // 过滤系统账号和特殊账号 - 完全复制cipher的逻辑
+        if (!username) continue
+        if (username === 'filehelper' || username === 'fmessage' || username === 'floatbottle' ||
+          username === 'medianote' || username === 'newsapp' || username.startsWith('fake_') ||
+          username === 'weixin' || username === 'qmessage' || username === 'qqmail' ||
+          username === 'tmessage' || username.startsWith('wxid_') === false &&
+          username.includes('@') === false && username.startsWith('gh_') === false &&
+          /^[a-zA-Z0-9_-]+$/.test(username) === false) {
+          continue
+        }
+
+        // 判断类型 - 正确规则：wxid开头且有alias的是好友
+        let type: 'friend' | 'group' | 'official' | 'other' = 'other'
+        const localType = row.local_type || 0
+
+        if (username.includes('@chatroom')) {
+          type = 'group'
+        } else if (username.startsWith('gh_')) {
+          type = 'official'
+        } else if (localType === 3 || localType === 4) {
+          type = 'official'
+        } else if (username.startsWith('wxid_') && row.alias) {
+          // wxid开头且有alias的是好友
+          type = 'friend'
+        } else if (localType === 1) {
+          // local_type=1 也是好友
+          type = 'friend'
+        } else if (localType === 2) {
+          // local_type=2 是群成员但非好友，跳过
+          continue
+        } else if (localType === 0) {
+          // local_type=0 可能是好友或其他，检查是否有备注或昵称
+          if (row.remark || row.nick_name) {
+            type = 'friend'
+          } else {
+            continue
+          }
+        } else {
+          // 其他未知类型，跳过
+          continue
+        }
+
+        const displayName = row.remark || row.nick_name || row.alias || username
+
+        contacts.push({
+          username,
+          displayName,
+          remark: row.remark || undefined,
+          nickname: row.nick_name || undefined,
+          avatarUrl: undefined,
+          type,
+          lastContactTime: lastContactTimeMap.get(username) || 0
+        })
+      }
+
+      console.log('过滤后得到', contacts.length, '个有效联系人')
+      console.log('📊 按类型统计:', {
+        friends: contacts.filter(c => c.type === 'friend').length,
+        groups: contacts.filter(c => c.type === 'group').length,
+        officials: contacts.filter(c => c.type === 'official').length,
+        other: contacts.filter(c => c.type === 'other').length
+      })
+
+      // 按最近联系时间排序
+      contacts.sort((a, b) => {
+        const timeA = a.lastContactTime || 0
+        const timeB = b.lastContactTime || 0
+        if (timeA && timeB) {
+          return timeB - timeA
+        }
+        if (timeA && !timeB) return -1
+        if (!timeA && timeB) return 1
+        return a.displayName.localeCompare(b.displayName, 'zh-CN')
+      })
+
+      // 移除临时的lastContactTime字段
+      const result = contacts.map(({ lastContactTime, ...rest }) => rest)
+
+      console.log('返回', result.length, '个联系人')
+      return { success: true, contacts: result }
+    } catch (e) {
+      console.error('ChatService: 获取通讯录失败:', e)
+      return { success: false, error: String(e) }
     }
   }
 

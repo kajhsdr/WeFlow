@@ -24,6 +24,7 @@ interface ExportOptions {
   excelCompactColumns: boolean
   txtColumns: string[]
   displayNamePreference: 'group-nickname' | 'remark' | 'nickname'
+  exportConcurrency: number
 }
 
 interface ExportResult {
@@ -68,7 +69,8 @@ function ExportPage() {
     exportVoiceAsText: true,
     excelCompactColumns: true,
     txtColumns: defaultTxtColumns,
-    displayNamePreference: 'remark'
+    displayNamePreference: 'remark',
+    exportConcurrency: 2
   })
 
   const buildDateRangeFromPreset = (preset: string) => {
@@ -133,14 +135,16 @@ function ExportPage() {
         savedMedia,
         savedVoiceAsText,
         savedExcelCompactColumns,
-        savedTxtColumns
+        savedTxtColumns,
+        savedConcurrency
       ] = await Promise.all([
         configService.getExportDefaultFormat(),
         configService.getExportDefaultDateRange(),
         configService.getExportDefaultMedia(),
         configService.getExportDefaultVoiceAsText(),
         configService.getExportDefaultExcelCompactColumns(),
-        configService.getExportDefaultTxtColumns()
+        configService.getExportDefaultTxtColumns(),
+        configService.getExportDefaultConcurrency()
       ])
 
       const preset = savedRange || 'today'
@@ -155,7 +159,8 @@ function ExportPage() {
         exportMedia: savedMedia ?? false,
         exportVoiceAsText: savedVoiceAsText ?? true,
         excelCompactColumns: savedExcelCompactColumns ?? true,
-        txtColumns
+        txtColumns,
+        exportConcurrency: savedConcurrency ?? 2
       }))
     } catch (e) {
       console.error('加载导出默认设置失败:', e)
@@ -286,6 +291,7 @@ function ExportPage() {
         excelCompactColumns: options.excelCompactColumns,
         txtColumns: options.txtColumns,
         displayNamePreference: options.displayNamePreference,
+        exportConcurrency: options.exportConcurrency,
         sessionLayout,
         dateRange: options.useAllTime ? null : options.dateRange ? {
           start: Math.floor(options.dateRange.start.getTime() / 1000),

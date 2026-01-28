@@ -79,6 +79,7 @@ export interface ExportOptions {
   txtColumns?: string[]
   sessionLayout?: 'shared' | 'per-session'
   displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
+  exportConcurrency?: number
 }
 
 const TXT_COLUMN_DEFINITIONS: Array<{ id: string; label: string }> = [
@@ -1289,6 +1290,7 @@ class ExportService {
   ): Promise<{ rows: any[]; memberSet: Map<string, { member: ChatLabMember; avatarUrl?: string }>; firstTime: number | null; lastTime: number | null }> {
     const rows: any[] = []
     const memberSet = new Map<string, { member: ChatLabMember; avatarUrl?: string }>()
+    const senderSet = new Set<string>()
     let firstTime: number | null = null
     let lastTime: number | null = null
 
@@ -1322,16 +1324,7 @@ class ExportService {
           const localId = parseInt(row.local_id || row.localId || '0', 10)
 
           const actualSender = isSend ? cleanedMyWxid : (senderUsername || sessionId)
-          const memberInfo = await this.getContactInfo(actualSender)
-          if (!memberSet.has(actualSender)) {
-            memberSet.set(actualSender, {
-              member: {
-                platformId: actualSender,
-                accountName: memberInfo.displayName
-              },
-              avatarUrl: memberInfo.avatarUrl
-            })
-          }
+          senderSet.add(actualSender)
 
           // 提取媒体相关字段
           let imageMd5: string | undefined
@@ -1374,6 +1367,30 @@ class ExportService {
       }
     } finally {
       await wcdbService.closeMessageCursor(cursor.cursor)
+    }
+
+    if (senderSet.size > 0) {
+      const usernames = Array.from(senderSet)
+      const [nameResult, avatarResult] = await Promise.all([
+        wcdbService.getDisplayNames(usernames),
+        wcdbService.getAvatarUrls(usernames)
+      ])
+
+      const nameMap = nameResult.success && nameResult.map ? nameResult.map : {}
+      const avatarMap = avatarResult.success && avatarResult.map ? avatarResult.map : {}
+
+      for (const username of usernames) {
+        const displayName = nameMap[username] || username
+        const avatarUrl = avatarMap[username]
+        memberSet.set(username, {
+          member: {
+            platformId: username,
+            accountName: displayName
+          },
+          avatarUrl
+        })
+        this.contactCache.set(username, { displayName, avatarUrl })
+      }
     }
 
     return { rows, memberSet, firstTime, lastTime }
@@ -1606,6 +1623,14 @@ class ExportService {
     }
   }
 
+  private getWeflowHeader(): { version: string; exportedAt: number; generator: string } {
+    return {
+      version: '1.0.3',
+      exportedAt: Math.floor(Date.now() / 1000),
+      generator: 'WeFlow'
+    }
+  }
+
   /**
    * 生成通用的导出元数据 (参考 ChatLab 格式)
    */
@@ -1662,6 +1687,12 @@ class ExportService {
 
       const collected = await this.collectMessages(sessionId, cleanedMyWxid, options.dateRange)
       const allMessages = collected.rows
+
+      // 如果没有消息,不创建文件
+      if (allMessages.length === 0) {
+        return { success: false, error: '该会话在指定时间范围内没有消息' }
+      }
+
       if (isGroup) {
         await this.mergeGroupMembers(sessionId, collected.memberSet, options.exportAvatars === true)
       }
@@ -1847,6 +1878,16 @@ class ExportService {
       const sessionInfo = await this.getContactInfo(sessionId)
       const myInfo = await this.getContactInfo(cleanedMyWxid)
 
+      const contactCache = new Map<string, { success: boolean; contact?: any; error?: string }>()
+      const getContactCached = async (username: string) => {
+        if (contactCache.has(username)) {
+          return contactCache.get(username)!
+        }
+        const result = await wcdbService.getContact(username)
+        contactCache.set(username, result)
+        return result
+      }
+
       onProgress?.({
         current: 0,
         total: 100,
@@ -1859,6 +1900,12 @@ class ExportService {
       }
 
       const collected = await this.collectMessages(sessionId, cleanedMyWxid, options.dateRange)
+
+      // 如果没有消息,不创建文件
+      if (collected.rows.length === 0) {
+        return { success: false, error: '该会话在指定时间范围内没有消息' }
+      }
+
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
 
       // ========== 阶段1：并行导出媒体文件 ==========
@@ -1951,7 +1998,7 @@ class ExportService {
 
         // 获取发送者信息用于名称显示
         const senderWxid = msg.senderUsername
-        const contact = await wcdbService.getContact(senderWxid)
+        const contact = await getContactCached(senderWxid)
         const senderNickname = contact.success && contact.contact?.nickName
           ? contact.contact.nickName
           : (senderInfo.displayName || senderWxid)
@@ -1994,7 +2041,7 @@ class ExportService {
       const { chatlab, meta } = this.getExportMeta(sessionId, sessionInfo, isGroup)
 
       // 获取会话的昵称和备注信息
-      const sessionContact = await wcdbService.getContact(sessionId)
+      const sessionContact = await getContactCached(sessionId)
       const sessionNickname = sessionContact.success && sessionContact.contact?.nickName
         ? sessionContact.contact.nickName
         : sessionInfo.displayName
@@ -2014,7 +2061,9 @@ class ExportService {
         options.displayNamePreference || 'remark'
       )
 
+      const weflow = this.getWeflowHeader()
       const detailedExport: any = {
+        weflow,
         session: {
           wxid: sessionId,
           nickname: sessionNickname,
@@ -2085,8 +2134,18 @@ class ExportService {
       const sessionInfo = await this.getContactInfo(sessionId)
       const myInfo = await this.getContactInfo(cleanedMyWxid)
 
+      const contactCache = new Map<string, { success: boolean; contact?: any; error?: string }>()
+      const getContactCached = async (username: string) => {
+        if (contactCache.has(username)) {
+          return contactCache.get(username)!
+        }
+        const result = await wcdbService.getContact(username)
+        contactCache.set(username, result)
+        return result
+      }
+
       // 获取会话的备注信息
-      const sessionContact = await wcdbService.getContact(sessionId)
+      const sessionContact = await getContactCached(sessionId)
       const sessionRemark = sessionContact.success && sessionContact.contact?.remark ? sessionContact.contact.remark : ''
       const sessionNickname = sessionContact.success && sessionContact.contact?.nickName ? sessionContact.contact.nickName : sessionId
 
@@ -2103,6 +2162,10 @@ class ExportService {
 
       const collected = await this.collectMessages(sessionId, cleanedMyWxid, options.dateRange)
 
+      // 如果没有消息,不创建文件
+      if (collected.rows.length === 0) {
+        return { success: false, error: '该会话在指定时间范围内没有消息' }
+      }
 
       onProgress?.({
         current: 30,
@@ -2315,7 +2378,7 @@ class ExportService {
           senderWxid = msg.senderUsername
 
           // 用 getContact 获取联系人详情，分别取昵称和备注
-          const contactDetail = await wcdbService.getContact(msg.senderUsername)
+          const contactDetail = await getContactCached(msg.senderUsername)
           if (contactDetail.success && contactDetail.contact) {
             // nickName 才是真正的昵称
             senderNickname = contactDetail.contact.nickName || msg.senderUsername
@@ -2330,7 +2393,7 @@ class ExportService {
         } else {
           // 单聊对方消息 - 用 getContact 获取联系人详情
           senderWxid = sessionId
-          const contactDetail = await wcdbService.getContact(sessionId)
+          const contactDetail = await getContactCached(sessionId)
           if (contactDetail.success && contactDetail.contact) {
             senderNickname = contactDetail.contact.nickName || sessionId
             senderRemark = contactDetail.contact.remark || ''
@@ -2351,12 +2414,15 @@ class ExportService {
         const row = worksheet.getRow(currentRow)
         row.height = 24
 
-        const contentValue = this.formatPlainExportContent(
-          msg.content,
-          msg.localType,
-          options,
-          voiceTranscriptMap.get(msg.localId)
-        )
+        const mediaKey = `${msg.localType}_${msg.localId}`
+        const mediaItem = mediaCache.get(mediaKey)
+        const contentValue = mediaItem?.relativePath
+          || this.formatPlainExportContent(
+            msg.content,
+            msg.localType,
+            options,
+            voiceTranscriptMap.get(msg.localId)
+          )
 
         // 调试日志
         if (msg.localType === 3 || msg.localType === 47) {
@@ -2495,6 +2561,12 @@ class ExportService {
       }
 
       const collected = await this.collectMessages(sessionId, cleanedMyWxid, options.dateRange)
+
+      // 如果没有消息,不创建文件
+      if (collected.rows.length === 0) {
+        return { success: false, error: '该会话在指定时间范围内没有消息' }
+      }
+
       const sortedMessages = collected.rows.sort((a, b) => a.createTime - b.createTime)
 
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
@@ -2563,12 +2635,15 @@ class ExportService {
 
       for (let i = 0; i < sortedMessages.length; i++) {
         const msg = sortedMessages[i]
-        const contentValue = this.formatPlainExportContent(
-          msg.content,
-          msg.localType,
-          options,
-          voiceTranscriptMap.get(msg.localId)
-        )
+        const mediaKey = `${msg.localType}_${msg.localId}`
+        const mediaItem = mediaCache.get(mediaKey)
+        const contentValue = mediaItem?.relativePath
+          || this.formatPlainExportContent(
+            msg.content,
+            msg.localType,
+            options,
+            voiceTranscriptMap.get(msg.localId)
+          )
 
         let senderRole: string
         let senderWxid: string
@@ -2581,7 +2656,7 @@ class ExportService {
           senderNickname = myInfo.displayName || cleanedMyWxid
         } else if (isGroup && msg.senderUsername) {
           senderWxid = msg.senderUsername
-          const contactDetail = await wcdbService.getContact(msg.senderUsername)
+          const contactDetail = await getContactCached(msg.senderUsername)
           if (contactDetail.success && contactDetail.contact) {
             senderNickname = contactDetail.contact.nickName || msg.senderUsername
             senderRemark = contactDetail.contact.remark || ''
@@ -2592,7 +2667,7 @@ class ExportService {
           }
         } else {
           senderWxid = sessionId
-          const contactDetail = await wcdbService.getContact(sessionId)
+          const contactDetail = await getContactCached(sessionId)
           if (contactDetail.success && contactDetail.contact) {
             senderNickname = contactDetail.contact.nickName || sessionId
             senderRemark = contactDetail.contact.remark || ''
@@ -2670,6 +2745,12 @@ class ExportService {
       }
 
       const collected = await this.collectMessages(sessionId, cleanedMyWxid, options.dateRange)
+
+      // 如果没有消息,不创建文件
+      if (collected.rows.length === 0) {
+        return { success: false, error: '该会话在指定时间范围内没有消息' }
+      }
+
       if (isGroup) {
         await this.mergeGroupMembers(sessionId, collected.memberSet, options.exportAvatars === true)
       }
@@ -3017,13 +3098,20 @@ class ExportService {
       const sessionLayout = exportMediaEnabled
         ? (options.sessionLayout ?? 'per-session')
         : 'shared'
+      let completedCount = 0
+      const rawConcurrency = typeof options.exportConcurrency === 'number'
+        ? Math.floor(options.exportConcurrency)
+        : 2
+      const clampedConcurrency = Math.max(1, Math.min(rawConcurrency, 6))
+      const sessionConcurrency = (exportMediaEnabled && sessionLayout === 'shared')
+        ? 1
+        : clampedConcurrency
 
-      for (let i = 0; i < sessionIds.length; i++) {
-        const sessionId = sessionIds[i]
+      await parallelLimit(sessionIds, sessionConcurrency, async (sessionId) => {
         const sessionInfo = await this.getContactInfo(sessionId)
 
         onProgress?.({
-          current: i + 1,
+          current: completedCount,
           total: sessionIds.length,
           currentSession: sessionInfo.displayName,
           phase: 'exporting'
@@ -3065,7 +3153,15 @@ class ExportService {
           failCount++
           console.error(`导出 ${sessionId} 失败:`, result.error)
         }
-      }
+
+        completedCount++
+        onProgress?.({
+          current: completedCount,
+          total: sessionIds.length,
+          currentSession: sessionInfo.displayName,
+          phase: 'exporting'
+        })
+      })
 
       onProgress?.({
         current: sessionIds.length,

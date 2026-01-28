@@ -29,7 +29,8 @@ export const CONFIG_KEYS = {
   EXPORT_DEFAULT_MEDIA: 'exportDefaultMedia',
   EXPORT_DEFAULT_VOICE_AS_TEXT: 'exportDefaultVoiceAsText',
   EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS: 'exportDefaultExcelCompactColumns',
-  EXPORT_DEFAULT_TXT_COLUMNS: 'exportDefaultTxtColumns'
+  EXPORT_DEFAULT_TXT_COLUMNS: 'exportDefaultTxtColumns',
+  EXPORT_DEFAULT_CONCURRENCY: 'exportDefaultConcurrency'
 } as const
 
 export interface WxidConfig {
@@ -351,4 +352,16 @@ export async function getExportDefaultTxtColumns(): Promise<string[] | null> {
 // 设置导出默认 TXT 列配置
 export async function setExportDefaultTxtColumns(columns: string[]): Promise<void> {
   await config.set(CONFIG_KEYS.EXPORT_DEFAULT_TXT_COLUMNS, columns)
+}
+
+// 获取导出默认并发数
+export async function getExportDefaultConcurrency(): Promise<number | null> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_DEFAULT_CONCURRENCY)
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  return null
+}
+
+// 设置导出默认并发数
+export async function setExportDefaultConcurrency(concurrency: number): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_DEFAULT_CONCURRENCY, concurrency)
 }

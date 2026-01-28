@@ -26,6 +26,7 @@ interface ConfigSchema {
   whisperDownloadSource: string
   autoTranscribeVoice: boolean
   transcribeLanguages: string[]
+  exportDefaultConcurrency: number
 }
 
 export class ConfigService {
@@ -54,7 +55,8 @@ export class ConfigService {
         whisperModelDir: '',
         whisperDownloadSource: 'tsinghua',
         autoTranscribeVoice: false,
-        transcribeLanguages: ['zh']
+        transcribeLanguages: ['zh'],
+        exportDefaultConcurrency: 2
       }
     })
   }

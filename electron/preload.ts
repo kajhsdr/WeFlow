@@ -120,7 +120,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('chat:voiceTranscriptPartial', listener)
     },
     execQuery: (kind: string, path: string | null, sql: string) =>
-      ipcRenderer.invoke('chat:execQuery', kind, path, sql)
+      ipcRenderer.invoke('chat:execQuery', kind, path, sql),
+    getContacts: () => ipcRenderer.invoke('chat:getContacts')
   },
 
 
@@ -194,6 +195,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('export:exportSessions', sessionIds, outputDir, options),
     exportSession: (sessionId: string, outputPath: string, options: any) =>
       ipcRenderer.invoke('export:exportSession', sessionId, outputPath, options),
+    exportContacts: (outputDir: string, options: any) =>
+      ipcRenderer.invoke('export:exportContacts', outputDir, options),
     onProgress: (callback: (payload: { current: number; total: number; currentSession: string; phase: string }) => void) => {
       ipcRenderer.on('export:progress', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('export:progress')

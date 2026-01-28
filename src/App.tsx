@@ -17,6 +17,7 @@ import SettingsPage from './pages/SettingsPage'
 import ExportPage from './pages/ExportPage'
 import VideoWindow from './pages/VideoWindow'
 import SnsPage from './pages/SnsPage'
+import ContactsPage from './pages/ContactsPage'
 
 import { useAppStore } from './stores/appStore'
 import { themes, useThemeStore, type ThemeId } from './stores/themeStore'
@@ -349,6 +350,7 @@ function App() {
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/export" element={<ExportPage />} />
               <Route path="/sns" element={<SnsPage />} />
+              <Route path="/contacts" element={<ContactsPage />} />
             </Routes>
           </RouteGuard>
         </main>
