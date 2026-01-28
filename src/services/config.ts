@@ -6,6 +6,7 @@ export const CONFIG_KEYS = {
   DECRYPT_KEY: 'decryptKey',
   DB_PATH: 'dbPath',
   MY_WXID: 'myWxid',
+  WXID_CONFIGS: 'wxidConfigs',
   THEME: 'theme',
   THEME_ID: 'themeId',
   LAST_SESSION: 'lastSession',
@@ -27,8 +28,16 @@ export const CONFIG_KEYS = {
   EXPORT_DEFAULT_DATE_RANGE: 'exportDefaultDateRange',
   EXPORT_DEFAULT_MEDIA: 'exportDefaultMedia',
   EXPORT_DEFAULT_VOICE_AS_TEXT: 'exportDefaultVoiceAsText',
-  EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS: 'exportDefaultExcelCompactColumns'
+  EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS: 'exportDefaultExcelCompactColumns',
+  EXPORT_DEFAULT_TXT_COLUMNS: 'exportDefaultTxtColumns'
 } as const
+
+export interface WxidConfig {
+  decryptKey?: string
+  imageXorKey?: number
+  imageAesKey?: string
+  updatedAt?: number
+}
 
 // 获取解密密钥
 export async function getDecryptKey(): Promise<string | null> {
@@ -61,6 +70,32 @@ export async function getMyWxid(): Promise<string | null> {
 // 设置当前用户 wxid
 export async function setMyWxid(wxid: string): Promise<void> {
   await config.set(CONFIG_KEYS.MY_WXID, wxid)
+}
+
+export async function getWxidConfigs(): Promise<Record<string, WxidConfig>> {
+  const value = await config.get(CONFIG_KEYS.WXID_CONFIGS)
+  if (value && typeof value === 'object') {
+    return value as Record<string, WxidConfig>
+  }
+  return {}
+}
+
+export async function getWxidConfig(wxid: string): Promise<WxidConfig | null> {
+  if (!wxid) return null
+  const configs = await getWxidConfigs()
+  return configs[wxid] || null
+}
+
+export async function setWxidConfig(wxid: string, configValue: WxidConfig): Promise<void> {
+  if (!wxid) return
+  const configs = await getWxidConfigs()
+  const previous = configs[wxid] || {}
+  configs[wxid] = {
+    ...previous,
+    ...configValue,
+    updatedAt: Date.now()
+  }
+  await config.set(CONFIG_KEYS.WXID_CONFIGS, configs)
 }
 
 // 获取主题
@@ -305,4 +340,15 @@ export async function getExportDefaultExcelCompactColumns(): Promise<boolean | n
 // 设置导出默认 Excel 列模式
 export async function setExportDefaultExcelCompactColumns(enabled: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS, enabled)
+}
+
+// 获取导出默认 TXT 列配置
+export async function getExportDefaultTxtColumns(): Promise<string[] | null> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_DEFAULT_TXT_COLUMNS)
+  return Array.isArray(value) ? (value as string[]) : null
+}
+
+// 设置导出默认 TXT 列配置
+export async function setExportDefaultTxtColumns(columns: string[]): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_DEFAULT_TXT_COLUMNS, columns)
 }

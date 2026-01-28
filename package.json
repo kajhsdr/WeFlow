@@ -1,9 +1,10 @@
 {
   "name": "weflow",
-  "version": "1.2.0",
+  "version": "1.4.1",
   "description": "WeFlow",
   "main": "dist-electron/main.js",
   "author": "cc",
+  "//": "二改不应改变此处的作者与应用信息",
   "scripts": {
     "postinstall": "echo 'No native modules to rebuild'",
     "rebuild": "echo 'No native modules to rebuild'",
@@ -105,6 +106,24 @@
     "asarUnpack": [
       "node_modules/silk-wasm/**/*",
       "node_modules/sherpa-onnx-node/**/*"
+    ],
+    "extraFiles": [
+      {
+        "from": "resources/msvcp140.dll",
+        "to": "."
+      },
+      {
+        "from": "resources/msvcp140_1.dll",
+        "to": "."
+      },
+      {
+        "from": "resources/vcruntime140.dll",
+        "to": "."
+      },
+      {
+        "from": "resources/vcruntime140_1.dll",
+        "to": "."
+      }
     ]
   }
 }

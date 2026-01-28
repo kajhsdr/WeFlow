@@ -23,6 +23,15 @@ export interface Contact {
   smallHeadUrl: string
 }
 
+export interface ContactInfo {
+  username: string
+  displayName: string
+  remark?: string
+  nickname?: string
+  avatarUrl?: string
+  type: 'friend' | 'group' | 'official' | 'other'
+}
+
 // 消息
 export interface Message {
   localId: number

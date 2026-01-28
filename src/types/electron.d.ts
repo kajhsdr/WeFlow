@@ -1,4 +1,4 @@
-import type { ChatSession, Message, Contact } from './models'
+import type { ChatSession, Message, Contact, ContactInfo } from './models'
 
 export interface ElectronAPI {
   window: {
@@ -63,7 +63,7 @@ export interface ElectronAPI {
       contacts?: Record<string, { displayName?: string; avatarUrl?: string }>
       error?: string
     }>
-    getMessages: (sessionId: string, offset?: number, limit?: number) => Promise<{
+    getMessages: (sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) => Promise<{
       success: boolean;
       messages?: Message[];
       hasMore?: boolean;
@@ -76,6 +76,11 @@ export interface ElectronAPI {
     }>
     getContact: (username: string) => Promise<Contact | null>
     getContactAvatar: (username: string) => Promise<{ avatarUrl?: string; displayName?: string } | null>
+    getContacts: () => Promise<{
+      success: boolean
+      contacts?: ContactInfo[]
+      error?: string
+    }>
     getMyAvatarUrl: () => Promise<{ success: boolean; avatarUrl?: string; error?: string }>
     downloadEmoji: (cdnUrl: string, md5?: string) => Promise<{ success: boolean; localPath?: string; error?: string }>
     close: () => Promise<boolean>
@@ -100,6 +105,7 @@ export interface ElectronAPI {
     resolveVoiceCache: (sessionId: string, msgId: string) => Promise<{ success: boolean; hasCache: boolean; data?: string }>
     getVoiceTranscript: (sessionId: string, msgId: string, createTime?: number) => Promise<{ success: boolean; transcript?: string; error?: string }>
     onVoiceTranscriptPartial: (callback: (payload: { msgId: string; text: string }) => void) => () => void
+    execQuery: (kind: string, path: string | null, sql: string) => Promise<{ success: boolean; rows?: any[]; error?: string }>
   }
 
   image: {
@@ -314,11 +320,37 @@ export interface ElectronAPI {
       success: boolean
       error?: string
     }>
+    exportContacts: (outputDir: string, options: { format: 'json' | 'csv' | 'vcf'; exportAvatars: boolean; contactTypes: { friends: boolean; groups: boolean; officials: boolean } }) => Promise<{
+      success: boolean
+      successCount?: number
+      error?: string
+    }>
+    onProgress: (callback: (payload: ExportProgress) => void) => () => void
   }
   whisper: {
     downloadModel: () => Promise<{ success: boolean; modelPath?: string; tokensPath?: string; error?: string }>
     getModelStatus: () => Promise<{ success: boolean; exists?: boolean; modelPath?: string; tokensPath?: string; sizeBytes?: number; error?: string }>
     onDownloadProgress: (callback: (payload: { modelName: string; downloadedBytes: number; totalBytes?: number; percent?: number }) => void) => () => void
+  }
+  sns: {
+    getTimeline: (limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) => Promise<{
+      success: boolean
+      timeline?: Array<{
+        id: string
+        username: string
+        nickname: string
+        avatarUrl?: string
+        createTime: number
+        contentDesc: string
+        type?: number
+        media: Array<{ url: string; thumb: string }>
+        likes: Array<string>
+        comments: Array<{ id: string; nickname: string; content: string; refCommentId: string; refNickname?: string }>
+      }>
+      error?: string
+    }>
+    debugResource: (url: string) => Promise<{ success: boolean; status?: number; headers?: any; error?: string }>
+    proxyImage: (url: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
   }
 }
 
@@ -332,6 +364,16 @@ export interface ExportOptions {
   exportEmojis?: boolean
   exportVoiceAsText?: boolean
   excelCompactColumns?: boolean
+  txtColumns?: string[]
+  sessionLayout?: 'shared' | 'per-session'
+  displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
+}
+
+export interface ExportProgress {
+  current: number
+  total: number
+  currentSession: string
+  phase: 'preparing' | 'exporting' | 'writing' | 'complete'
 }
 
 export interface WxidInfo {

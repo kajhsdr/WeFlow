@@ -58,12 +58,24 @@ export class WcdbService {
       })
 
       this.worker.on('error', (err) => {
-        // Worker error
+        // Worker 发生错误，需要 reject 所有 pending promises
+        console.error('WCDB Worker 错误:', err)
+        const errorMsg = err instanceof Error ? err.message : String(err)
+        for (const [id, p] of this.pending) {
+          p.reject(new Error(`Worker 错误: ${errorMsg}`))
+        }
+        this.pending.clear()
       })
 
       this.worker.on('exit', (code) => {
+        // Worker 退出，需要 reject 所有 pending promises
         if (code !== 0) {
-          // Worker exited with error
+          console.error('WCDB Worker 异常退出，退出码:', code)
+          const errorMsg = `Worker 异常退出 (退出码: ${code})。可能是 DLL 加载失败，请检查是否安装了 Visual C++ Redistributable。`
+          for (const [id, p] of this.pending) {
+            p.reject(new Error(errorMsg))
+          }
+          this.pending.clear()
         }
         this.worker = null
       })
@@ -348,6 +360,13 @@ export class WcdbService {
    */
   async getVoiceData(sessionId: string, createTime: number, candidates: string[], localId: number = 0, svrId: string | number = 0): Promise<{ success: boolean; hex?: string; error?: string }> {
     return this.callWorker('getVoiceData', { sessionId, createTime, candidates, localId, svrId })
+  }
+
+  /**
+   * 获取朋友圈
+   */
+  async getSnsTimeline(limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number): Promise<{ success: boolean; timeline?: any[]; error?: string }> {
+    return this.callWorker('getSnsTimeline', { limit, offset, usernames, keyword, startTime, endTime })
   }
 
 }
