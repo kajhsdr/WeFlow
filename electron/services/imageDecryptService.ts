@@ -899,42 +899,71 @@ export class ImageDecryptService {
   }
 
   private findCachedOutput(cacheKey: string, preferHd: boolean = false, sessionId?: string): string | null {
-    const root = this.getCacheRoot()
+    const allRoots = this.getAllCacheRoots()
     const normalizedKey = this.normalizeDatBase(cacheKey.toLowerCase())
     const extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
 
-    if (sessionId) {
-      const sessionDir = join(root, this.sanitizeDirName(sessionId))
-      if (existsSync(sessionDir)) {
-        try {
-          const sessionEntries = readdirSync(sessionDir)
-          for (const entry of sessionEntries) {
-            const timeDir = join(sessionDir, entry)
-            if (!this.isDirectory(timeDir)) continue
-            const hit = this.findCachedOutputInDir(timeDir, normalizedKey, extensions, preferHd)
-            if (hit) return hit
-          }
-        } catch {
-          // ignore
+    // 遍历所有可能的缓存根路径
+    for (const root of allRoots) {
+      // 策略1: 新目录结构 Images/{sessionId}/{YYYY-MM}/{file}_hd.jpg
+      if (sessionId) {
+        const sessionDir = join(root, this.sanitizeDirName(sessionId))
+        if (existsSync(sessionDir)) {
+          try {
+            const dateDirs = readdirSync(sessionDir, { withFileTypes: true })
+              .filter(d => d.isDirectory() && /^\d{4}-\d{2}$/.test(d.name))
+              .map(d => d.name)
+              .sort()
+              .reverse() // 最新的日期优先
+
+            for (const dateDir of dateDirs) {
+              const imageDir = join(sessionDir, dateDir)
+              const hit = this.findCachedOutputInDir(imageDir, normalizedKey, extensions, preferHd)
+              if (hit) return hit
+            }
+          } catch { }
         }
       }
-    }
 
-    // 新目录结构: Images/{normalizedKey}/{normalizedKey}_thumb.jpg 或 _hd.jpg
-    const imageDir = join(root, normalizedKey)
-    if (existsSync(imageDir)) {
-      const hit = this.findCachedOutputInDir(imageDir, normalizedKey, extensions, preferHd)
-      if (hit) return hit
-    }
+      // 策略2: 遍历所有 sessionId 目录查找（如果没有指定 sessionId）
+      try {
+        const sessionDirs = readdirSync(root, { withFileTypes: true })
+          .filter(d => d.isDirectory())
+          .map(d => d.name)
 
-    // 兼容旧的平铺结构
-    for (const ext of extensions) {
-      const candidate = join(root, `${cacheKey}${ext}`)
-      if (existsSync(candidate)) return candidate
-    }
-    for (const ext of extensions) {
-      const candidate = join(root, `${cacheKey}_t${ext}`)
-      if (existsSync(candidate)) return candidate
+        for (const session of sessionDirs) {
+          const sessionDir = join(root, session)
+          // 检查是否是日期目录结构
+          try {
+            const subDirs = readdirSync(sessionDir, { withFileTypes: true })
+              .filter(d => d.isDirectory() && /^\d{4}-\d{2}$/.test(d.name))
+              .map(d => d.name)
+
+            for (const dateDir of subDirs) {
+              const imageDir = join(sessionDir, dateDir)
+              const hit = this.findCachedOutputInDir(imageDir, normalizedKey, extensions, preferHd)
+              if (hit) return hit
+            }
+          } catch { }
+        }
+      } catch { }
+
+      // 策略3: 旧目录结构 Images/{normalizedKey}/{normalizedKey}_thumb.jpg
+      const oldImageDir = join(root, normalizedKey)
+      if (existsSync(oldImageDir)) {
+        const hit = this.findCachedOutputInDir(oldImageDir, normalizedKey, extensions, preferHd)
+        if (hit) return hit
+      }
+
+      // 策略4: 最旧的平铺结构 Images/{file}.jpg
+      for (const ext of extensions) {
+        const candidate = join(root, `${cacheKey}${ext}`)
+        if (existsSync(candidate)) return candidate
+      }
+      for (const ext of extensions) {
+        const candidate = join(root, `${cacheKey}_t${ext}`)
+        if (existsSync(candidate)) return candidate
+      }
     }
 
     return null
@@ -1104,20 +1133,57 @@ export class ImageDecryptService {
     if (this.cacheIndexed) return
     if (this.cacheIndexing) return this.cacheIndexing
     this.cacheIndexing = new Promise((resolve) => {
-      const root = this.getCacheRoot()
-      try {
-        this.indexCacheDir(root, 2, 0)
-      } catch {
-        this.cacheIndexed = true
-        this.cacheIndexing = null
-        resolve()
-        return
+      // 扫描所有可能的缓存根目录
+      const allRoots = this.getAllCacheRoots()
+      this.logInfo('开始索引缓存', { roots: allRoots.length })
+      
+      for (const root of allRoots) {
+        try {
+          this.indexCacheDir(root, 3, 0) // 增加深度到3，支持 sessionId/YYYY-MM 结构
+        } catch (e) {
+          this.logError('索引目录失败', e, { root })
+        }
       }
+      
+      this.logInfo('缓存索引完成', { entries: this.resolvedCache.size })
       this.cacheIndexed = true
       this.cacheIndexing = null
       resolve()
     })
     return this.cacheIndexing
+  }
+
+  /**
+   * 获取所有可能的缓存根路径（用于查找已缓存的图片）
+   * 包含当前路径、配置路径、旧版本路径
+   */
+  private getAllCacheRoots(): string[] {
+    const roots: string[] = []
+    const configured = this.configService.get('cachePath')
+    const documentsPath = app.getPath('documents')
+
+    // 主要路径（当前使用的）
+    const mainRoot = this.getCacheRoot()
+    roots.push(mainRoot)
+
+    // 如果配置了自定义路径，也检查其下的 Images
+    if (configured) {
+      roots.push(join(configured, 'Images'))
+      roots.push(join(configured, 'images'))
+    }
+
+    // 默认路径
+    roots.push(join(documentsPath, 'WeFlow', 'Images'))
+    roots.push(join(documentsPath, 'WeFlow', 'images'))
+    
+    // 兼容旧路径（如果有的话）
+    roots.push(join(documentsPath, 'WeFlowData', 'Images'))
+
+    // 去重并过滤存在的路径
+    const uniqueRoots = Array.from(new Set(roots))
+    const existingRoots = uniqueRoots.filter(r => existsSync(r))
+
+    return existingRoots
   }
 
   private indexCacheDir(root: string, maxDepth: number, depth: number): void {
