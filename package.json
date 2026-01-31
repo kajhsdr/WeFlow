@@ -4,6 +4,10 @@
   "description": "WeFlow",
   "main": "dist-electron/main.js",
   "author": "cc",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hicccc77/WeFlow"
+  },
   "//": "二改不应改变此处的作者与应用信息",
   "scripts": {
     "postinstall": "echo 'No native modules to rebuild'",
@@ -55,6 +59,8 @@
     "appId": "com.WeFlow.app",
     "publish": {
       "provider": "github",
+      "owner": "hicccc77",
+      "repo": "WeFlow",
       "releaseType": "release"
     },
     "productName": "WeFlow",
