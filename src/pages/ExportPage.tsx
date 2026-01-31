@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Search, Download, FolderOpen, RefreshCw, Check, Calendar, FileJson, FileText, Table, Loader2, X, ChevronDown, ChevronLeft, ChevronRight, FileSpreadsheet, Database, FileCode, CheckCircle, XCircle, ExternalLink } from 'lucide-react'
 import * as configService from '../services/config'
 import './ExportPage.scss'
@@ -19,9 +19,13 @@ interface ExportOptions {
   exportMedia: boolean
   exportImages: boolean
   exportVoices: boolean
+  exportVideos: boolean
   exportEmojis: boolean
   exportVoiceAsText: boolean
   excelCompactColumns: boolean
+  txtColumns: string[]
+  displayNamePreference: 'group-nickname' | 'remark' | 'nickname'
+  exportConcurrency: number
 }
 
 interface ExportResult {
@@ -31,7 +35,10 @@ interface ExportResult {
   error?: string
 }
 
+type SessionLayout = 'shared' | 'per-session'
+
 function ExportPage() {
+  const defaultTxtColumns = ['index', 'time', 'senderRole', 'messageType', 'content']
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [filteredSessions, setFilteredSessions] = useState<ChatSession[]>([])
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set())
@@ -44,6 +51,9 @@ function ExportPage() {
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [calendarDate, setCalendarDate] = useState(new Date())
   const [selectingStart, setSelectingStart] = useState(true)
+  const [showMediaLayoutPrompt, setShowMediaLayoutPrompt] = useState(false)
+  const [showDisplayNameSelect, setShowDisplayNameSelect] = useState(false)
+  const displayNameDropdownRef = useRef<HTMLDivElement>(null)
 
   const [options, setOptions] = useState<ExportOptions>({
     format: 'excel',
@@ -56,9 +66,13 @@ function ExportPage() {
     exportMedia: false,
     exportImages: true,
     exportVoices: true,
+    exportVideos: true,
     exportEmojis: true,
     exportVoiceAsText: true,
-    excelCompactColumns: true
+    excelCompactColumns: true,
+    txtColumns: defaultTxtColumns,
+    displayNamePreference: 'remark',
+    exportConcurrency: 2
   })
 
   const buildDateRangeFromPreset = (preset: string) => {
@@ -122,17 +136,22 @@ function ExportPage() {
         savedRange,
         savedMedia,
         savedVoiceAsText,
-        savedExcelCompactColumns
+        savedExcelCompactColumns,
+        savedTxtColumns,
+        savedConcurrency
       ] = await Promise.all([
         configService.getExportDefaultFormat(),
         configService.getExportDefaultDateRange(),
         configService.getExportDefaultMedia(),
         configService.getExportDefaultVoiceAsText(),
-        configService.getExportDefaultExcelCompactColumns()
+        configService.getExportDefaultExcelCompactColumns(),
+        configService.getExportDefaultTxtColumns(),
+        configService.getExportDefaultConcurrency()
       ])
 
       const preset = savedRange || 'today'
       const rangeDefaults = buildDateRangeFromPreset(preset)
+      const txtColumns = savedTxtColumns && savedTxtColumns.length > 0 ? savedTxtColumns : defaultTxtColumns
 
       setOptions((prev) => ({
         ...prev,
@@ -141,7 +160,9 @@ function ExportPage() {
         dateRange: rangeDefaults.dateRange,
         exportMedia: savedMedia ?? false,
         exportVoiceAsText: savedVoiceAsText ?? true,
-        excelCompactColumns: savedExcelCompactColumns ?? true
+        excelCompactColumns: savedExcelCompactColumns ?? true,
+        txtColumns,
+        exportConcurrency: savedConcurrency ?? 2
       }))
     } catch (e) {
       console.error('加载导出默认设置失败:', e)
@@ -153,6 +174,42 @@ function ExportPage() {
     loadExportPath()
     loadExportDefaults()
   }, [loadSessions, loadExportPath, loadExportDefaults])
+
+  useEffect(() => {
+    const handleChange = () => {
+      setSelectedSessions(new Set())
+      setSearchKeyword('')
+      setExportResult(null)
+      setSessions([])
+      setFilteredSessions([])
+      loadSessions()
+    }
+    window.addEventListener('wxid-changed', handleChange as EventListener)
+    return () => window.removeEventListener('wxid-changed', handleChange as EventListener)
+  }, [loadSessions])
+
+  useEffect(() => {
+    const removeListener = window.electronAPI.export.onProgress?.((payload: { current: number; total: number; currentSession: string; phase: string }) => {
+      setExportProgress({
+        current: payload.current,
+        total: payload.total,
+        currentName: payload.currentSession
+      })
+    })
+    return () => {
+      removeListener?.()
+    }
+  }, [])
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (showDisplayNameSelect && displayNameDropdownRef.current && !displayNameDropdownRef.current.contains(target)) {
+        setShowDisplayNameSelect(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showDisplayNameSelect])
 
   useEffect(() => {
     if (!searchKeyword.trim()) {
@@ -193,13 +250,31 @@ function ExportPage() {
     return date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
   }
 
+  const handleFormatChange = (format: ExportOptions['format']) => {
+    setOptions((prev) => {
+      const next = { ...prev, format }
+      if (format === 'html') {
+        return {
+          ...next,
+          exportMedia: true,
+          exportImages: true,
+          exportVoices: true,
+          exportVideos: true,
+          exportEmojis: true,
+          exportVoiceAsText: true
+        }
+      }
+      return next
+    })
+  }
+
   const openExportFolder = async () => {
     if (exportFolder) {
       await window.electronAPI.shell.openPath(exportFolder)
     }
   }
 
-  const startExport = async () => {
+  const runExport = async (sessionLayout: SessionLayout) => {
     if (selectedSessions.size === 0 || !exportFolder) return
 
     setIsExporting(true)
@@ -214,17 +289,22 @@ function ExportPage() {
         exportMedia: options.exportMedia,
         exportImages: options.exportMedia && options.exportImages,
         exportVoices: options.exportMedia && options.exportVoices,
+        exportVideos: options.exportMedia && options.exportVideos,
         exportEmojis: options.exportMedia && options.exportEmojis,
-        exportVoiceAsText: options.exportVoiceAsText,  // 独立于 exportMedia
+        exportVoiceAsText: options.exportVoiceAsText,  // 即使不导出媒体，也可以导出语音转文字内容
         excelCompactColumns: options.excelCompactColumns,
+        txtColumns: options.txtColumns,
+        displayNamePreference: options.displayNamePreference,
+        exportConcurrency: options.exportConcurrency,
+        sessionLayout,
         dateRange: options.useAllTime ? null : options.dateRange ? {
           start: Math.floor(options.dateRange.start.getTime() / 1000),
-          // 将结束日期设置为当天的 23:59:59,以包含当天的所有消息
+          // 将结束日期设置为当天的 23:59:59，确保包含当天的所有记录
           end: Math.floor(new Date(options.dateRange.end.getFullYear(), options.dateRange.end.getMonth(), options.dateRange.end.getDate(), 23, 59, 59).getTime() / 1000)
         } : null
       }
 
-      if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel') {
+      if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel' || options.format === 'txt' || options.format === 'html') {
         const result = await window.electronAPI.export.exportSessions(
           sessionList,
           exportFolder,
@@ -232,14 +312,26 @@ function ExportPage() {
         )
         setExportResult(result)
       } else {
-        setExportResult({ success: false, error: `${options.format.toUpperCase()} 格式导出功能开发中...` })
+        setExportResult({ success: false, error: `${options.format.toUpperCase()} 格式目前暂未实现，请选择其他格式。` })
       }
     } catch (e) {
-      console.error('导出失败:', e)
+      console.error('导出过程中发生异常:', e)
       setExportResult({ success: false, error: String(e) })
     } finally {
       setIsExporting(false)
     }
+  }
+
+  const startExport = () => {
+    if (selectedSessions.size === 0 || !exportFolder) return
+
+    if (options.exportMedia && selectedSessions.size > 1) {
+      setShowMediaLayoutPrompt(true)
+      return
+    }
+
+    const layout: SessionLayout = options.exportMedia ? 'per-session' : 'shared'
+    runExport(layout)
   }
 
   const getDaysInMonth = (date: Date) => {
@@ -335,6 +427,25 @@ function ExportPage() {
     { value: 'excel', label: 'Excel', icon: FileSpreadsheet, desc: '电子表格，适合统计分析' },
     { value: 'sql', label: 'PostgreSQL', icon: Database, desc: '数据库脚本，便于导入到数据库' }
   ]
+  const displayNameOptions = [
+    {
+      value: 'group-nickname',
+      label: '群昵称优先',
+      desc: '仅群聊有效，私聊显示备注/昵称'
+    },
+    {
+      value: 'remark',
+      label: '备注优先',
+      desc: '有备注显示备注，否则显示昵称'
+    },
+    {
+      value: 'nickname',
+      label: '微信昵称',
+      desc: '始终显示微信昵称'
+    }
+  ]
+  const displayNameOption = displayNameOptions.find(option => option.value === options.displayNamePreference)
+  const displayNameLabel = displayNameOption?.label || '备注优先'
 
   return (
     <div className="export-page">
@@ -418,7 +529,7 @@ function ExportPage() {
                 <div
                   key={fmt.value}
                   className={`format-card ${options.format === fmt.value ? 'active' : ''}`}
-                  onClick={() => setOptions({ ...options, format: fmt.value as any })}
+                  onClick={() => handleFormatChange(fmt.value as ExportOptions['format'])}
                 >
                   <fmt.icon size={24} />
                   <span className="format-label">{fmt.label}</span>
@@ -430,28 +541,79 @@ function ExportPage() {
 
           <div className="setting-section">
             <h3>时间范围</h3>
-            <div className="time-options">
-              <label className="checkbox-item">
-                <input
-                  type="checkbox"
-                  checked={options.useAllTime}
-                  onChange={e => setOptions({ ...options, useAllTime: e.target.checked })}
-                />
-                <span>导出全部时间</span>
-              </label>
-              {!options.useAllTime && options.dateRange && (
-                <div className="date-range" onClick={() => setShowDatePicker(true)}>
-                  <Calendar size={16} />
-                  <span>{formatDate(options.dateRange.start)} - {formatDate(options.dateRange.end)}</span>
-                  <ChevronDown size={14} />
+            <p className="setting-subtitle">选择要导出的消息时间区间</p>
+            <div className="media-options-card">
+              <div className="media-switch-row">
+                <div className="media-switch-info">
+                  <span className="media-switch-title">导出全部时间</span>
+                  <span className="media-switch-desc">关闭此项以选择特定的起止日期</span>
                 </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={options.useAllTime}
+                    onChange={e => setOptions({ ...options, useAllTime: e.target.checked })}
+                  />
+                  <span className="switch-slider"></span>
+                </label>
+              </div>
+
+              {!options.useAllTime && options.dateRange && (
+                <>
+                  <div className="media-option-divider"></div>
+                  <div className="time-range-picker-item" onClick={() => setShowDatePicker(true)}>
+                    <div className="time-picker-info">
+                      <Calendar size={16} />
+                      <span>{formatDate(options.dateRange.start)} - {formatDate(options.dateRange.end)}</span>
+                    </div>
+                    <ChevronDown size={14} />
+                  </div>
+                </>
               )}
             </div>
           </div>
 
+          {/* 发送者名称显示偏好 */}
+          {(options.format === 'html' || options.format === 'json' || options.format === 'txt') && (
+            <div className="setting-section">
+              <h3>发送者名称显示</h3>
+              <p className="setting-subtitle">选择导出时优先显示的名称</p>
+              <div className="select-field" ref={displayNameDropdownRef}>
+                <button
+                  type="button"
+                  className={`select-trigger ${showDisplayNameSelect ? 'open' : ''}`}
+                  onClick={() => setShowDisplayNameSelect(!showDisplayNameSelect)}
+                >
+                  <span className="select-value">{displayNameLabel}</span>
+                  <ChevronDown size={16} />
+                </button>
+                {showDisplayNameSelect && (
+                  <div className="select-dropdown">
+                    {displayNameOptions.map(option => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={`select-option ${options.displayNamePreference === option.value ? 'active' : ''}`}
+                        onClick={() => {
+                          setOptions({
+                            ...options,
+                            displayNamePreference: option.value as ExportOptions['displayNamePreference']
+                          })
+                          setShowDisplayNameSelect(false)
+                        }}
+                      >
+                        <span className="option-label">{option.label}</span>
+                        <span className="option-desc">{option.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           <div className="setting-section">
             <h3>媒体文件</h3>
-            <p className="setting-subtitle">导出图片/语音/表情并在记录内写入相对路径</p>
+            <p className="setting-subtitle">导出图片/语音/视频/表情并在记录内写入相对路径</p>
             <div className="media-options-card">
               <div className="media-switch-row">
                 <div className="media-switch-info">
@@ -464,7 +626,7 @@ function ExportPage() {
                     checked={options.exportMedia}
                     onChange={e => setOptions({ ...options, exportMedia: e.target.checked })}
                   />
-                  <span className="slider"></span>
+                  <span className="switch-slider"></span>
                 </label>
               </div>
 
@@ -503,12 +665,27 @@ function ExportPage() {
               <label className="media-checkbox-row">
                 <div className="media-checkbox-info">
                   <span className="media-checkbox-title">语音转文字</span>
-                  <span className="media-checkbox-desc">将语音消息转换为文字导出（不导出语音文件）</span>
+                  <span className="media-checkbox-desc">将语音消息转换为文字导出</span>
                 </div>
                 <input
                   type="checkbox"
                   checked={options.exportVoiceAsText}
                   onChange={e => setOptions({ ...options, exportVoiceAsText: e.target.checked })}
+                />
+              </label>
+
+              <div className="media-option-divider"></div>
+
+              <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
+                <div className="media-checkbox-info">
+                  <span className="media-checkbox-title">视频</span>
+                  <span className="media-checkbox-desc">直接复制视频文件到导出目录</span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={options.exportVideos}
+                  disabled={!options.exportMedia}
+                  onChange={e => setOptions({ ...options, exportVideos: e.target.checked })}
                 />
               </label>
 
@@ -544,7 +721,7 @@ function ExportPage() {
                     checked={options.exportAvatars}
                     onChange={e => setOptions({ ...options, exportAvatars: e.target.checked })}
                   />
-                  <span className="slider"></span>
+                  <span className="switch-slider"></span>
                 </label>
               </div>
             </div>
@@ -599,6 +776,43 @@ function ExportPage() {
           </button>
         </div>
       </div>
+
+      {/* 媒体导出布局选择弹窗 */}
+      {showMediaLayoutPrompt && (
+        <div className="export-overlay" onClick={() => setShowMediaLayoutPrompt(false)}>
+          <div className="export-layout-modal" onClick={e => e.stopPropagation()}>
+            <h3>导出文件夹布局</h3>
+            <p className="layout-subtitle">检测到同时导出多个会话并包含媒体文件，请选择存放方式：</p>
+            <div className="layout-options">
+              <button
+                className="layout-option-btn primary"
+                onClick={() => {
+                  setShowMediaLayoutPrompt(false)
+                  runExport('shared')
+                }}
+              >
+                <span className="layout-title">所有会话在同一文件夹</span>
+                <span className="layout-desc">媒体会按会话名归档到 media 子目录</span>
+              </button>
+              <button
+                className="layout-option-btn"
+                onClick={() => {
+                  setShowMediaLayoutPrompt(false)
+                  runExport('per-session')
+                }}
+              >
+                <span className="layout-title">每个会话一个文件夹</span>
+                <span className="layout-desc">每个会话单独包含导出文件和媒体</span>
+              </button>
+            </div>
+            <div className="layout-actions">
+              <button className="layout-cancel-btn" onClick={() => setShowMediaLayoutPrompt(false)}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 导出进度弹窗 */}
       {isExporting && (

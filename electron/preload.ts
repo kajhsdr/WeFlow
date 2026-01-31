@@ -9,6 +9,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     clear: () => ipcRenderer.invoke('config:clear')
   },
 
+  // 认证
+  auth: {
+    hello: (message?: string) => ipcRenderer.invoke('auth:hello', message)
+  },
+
 
   // 对话框
   dialog: {
@@ -29,7 +34,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
     downloadAndInstall: () => ipcRenderer.invoke('app:downloadAndInstall'),
-    onDownloadProgress: (callback: (progress: number) => void) => {
+    onDownloadProgress: (callback: (progress: any) => void) => {
       ipcRenderer.on('app:downloadProgress', (_, progress) => callback(progress))
       return () => ipcRenderer.removeAllListeners('app:downloadProgress')
     },
@@ -57,13 +62,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openVideoPlayerWindow: (videoPath: string, videoWidth?: number, videoHeight?: number) =>
       ipcRenderer.invoke('window:openVideoPlayerWindow', videoPath, videoWidth, videoHeight),
     resizeToFitVideo: (videoWidth: number, videoHeight: number) =>
-      ipcRenderer.invoke('window:resizeToFitVideo', videoWidth, videoHeight)
+      ipcRenderer.invoke('window:resizeToFitVideo', videoWidth, videoHeight),
+    openChatHistoryWindow: (sessionId: string, messageId: number) =>
+      ipcRenderer.invoke('window:openChatHistoryWindow', sessionId, messageId)
   },
 
   // 数据库路径
   dbPath: {
     autoDetect: () => ipcRenderer.invoke('dbpath:autoDetect'),
     scanWxids: (rootPath: string) => ipcRenderer.invoke('dbpath:scanWxids', rootPath),
+    scanWxidCandidates: (rootPath: string) => ipcRenderer.invoke('dbpath:scanWxidCandidates', rootPath),
     getDefault: () => ipcRenderer.invoke('dbpath:getDefault')
   },
 
@@ -98,8 +106,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSessions: () => ipcRenderer.invoke('chat:getSessions'),
     enrichSessionsContactInfo: (usernames: string[]) =>
       ipcRenderer.invoke('chat:enrichSessionsContactInfo', usernames),
-    getMessages: (sessionId: string, offset?: number, limit?: number) =>
-      ipcRenderer.invoke('chat:getMessages', sessionId, offset, limit),
+    getMessages: (sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) =>
+      ipcRenderer.invoke('chat:getMessages', sessionId, offset, limit, startTime, endTime, ascending),
     getLatestMessages: (sessionId: string, limit?: number) =>
       ipcRenderer.invoke('chat:getLatestMessages', sessionId, limit),
     getContact: (username: string) => ipcRenderer.invoke('chat:getContact', username),
@@ -118,7 +126,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const listener = (_: any, payload: { msgId: string; text: string }) => callback(payload)
       ipcRenderer.on('chat:voiceTranscriptPartial', listener)
       return () => ipcRenderer.removeListener('chat:voiceTranscriptPartial', listener)
-    }
+    },
+    execQuery: (kind: string, path: string | null, sql: string) =>
+      ipcRenderer.invoke('chat:execQuery', kind, path, sql),
+    getContacts: () => ipcRenderer.invoke('chat:getContacts'),
+    getMessage: (sessionId: string, localId: number) =>
+      ipcRenderer.invoke('chat:getMessage', sessionId, localId)
   },
 
 
@@ -171,7 +184,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getGroupMembers: (chatroomId: string) => ipcRenderer.invoke('groupAnalytics:getGroupMembers', chatroomId),
     getGroupMessageRanking: (chatroomId: string, limit?: number, startTime?: number, endTime?: number) => ipcRenderer.invoke('groupAnalytics:getGroupMessageRanking', chatroomId, limit, startTime, endTime),
     getGroupActiveHours: (chatroomId: string, startTime?: number, endTime?: number) => ipcRenderer.invoke('groupAnalytics:getGroupActiveHours', chatroomId, startTime, endTime),
-    getGroupMediaStats: (chatroomId: string, startTime?: number, endTime?: number) => ipcRenderer.invoke('groupAnalytics:getGroupMediaStats', chatroomId, startTime, endTime)
+    getGroupMediaStats: (chatroomId: string, startTime?: number, endTime?: number) => ipcRenderer.invoke('groupAnalytics:getGroupMediaStats', chatroomId, startTime, endTime),
+    exportGroupMembers: (chatroomId: string, outputPath: string) => ipcRenderer.invoke('groupAnalytics:exportGroupMembers', chatroomId, outputPath)
   },
 
   // 年度报告
@@ -191,7 +205,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     exportSessions: (sessionIds: string[], outputDir: string, options: any) =>
       ipcRenderer.invoke('export:exportSessions', sessionIds, outputDir, options),
     exportSession: (sessionId: string, outputPath: string, options: any) =>
-      ipcRenderer.invoke('export:exportSession', sessionId, outputPath, options)
+      ipcRenderer.invoke('export:exportSession', sessionId, outputPath, options),
+    exportContacts: (outputDir: string, options: any) =>
+      ipcRenderer.invoke('export:exportContacts', outputDir, options),
+    onProgress: (callback: (payload: { current: number; total: number; currentSession: string; phase: string }) => void) => {
+      ipcRenderer.on('export:progress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('export:progress')
+    }
   },
 
   whisper: {
@@ -203,5 +223,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('whisper:downloadProgress', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('whisper:downloadProgress')
     }
+  },
+
+  // 朋友圈
+  sns: {
+    getTimeline: (limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('sns:getTimeline', limit, offset, usernames, keyword, startTime, endTime),
+    debugResource: (url: string) => ipcRenderer.invoke('sns:debugResource', url),
+    proxyImage: (url: string) => ipcRenderer.invoke('sns:proxyImage', url)
   }
 })
