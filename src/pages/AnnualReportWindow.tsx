@@ -282,7 +282,8 @@ function AnnualReportWindow() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.hash.split('?')[1] || '')
     const yearParam = params.get('year')
-    const year = yearParam ? parseInt(yearParam) : new Date().getFullYear()
+    const parsedYear = yearParam ? parseInt(yearParam, 10) : new Date().getFullYear()
+    const year = Number.isNaN(parsedYear) ? new Date().getFullYear() : parsedYear
     generateReport(year)
   }, [])
 
@@ -335,6 +336,11 @@ function AnnualReportWindow() {
     if (seconds < 60) return `${seconds}秒`
     if (seconds < 3600) return `${Math.round(seconds / 60)}分钟`
     return `${Math.round(seconds / 3600)}小时`
+  }
+
+  const formatYearLabel = (value: number, withSuffix: boolean = true) => {
+    if (value === 0) return '全部时间'
+    return withSuffix ? `${value}年` : `${value}`
   }
 
   // 获取可用的板块列表
@@ -595,7 +601,8 @@ function AnnualReportWindow() {
 
       const dataUrl = outputCanvas.toDataURL('image/png')
       const link = document.createElement('a')
-      link.download = `${reportData?.year}年度报告${filterIds ? '_自定义' : ''}.png`
+      const yearFilePrefix = reportData ? formatYearLabel(reportData.year, false) : ''
+      link.download = `${yearFilePrefix}年度报告${filterIds ? '_自定义' : ''}.png`
       link.href = dataUrl
       document.body.appendChild(link)
       link.click()
@@ -658,11 +665,12 @@ function AnnualReportWindow() {
     }
 
     setExportProgress('正在写入文件...')
+    const yearFilePrefix = reportData ? formatYearLabel(reportData.year, false) : ''
     const exportResult = await window.electronAPI.annualReport.exportImages({
       baseDir: dirResult.filePaths[0],
-      folderName: `${reportData?.year}年度报告_分模块`,
+      folderName: `${yearFilePrefix}年度报告_分模块`,
       images: exportedImages.map((img) => ({
-        name: `${reportData?.year}年度报告_${img.name}.png`,
+        name: `${yearFilePrefix}年度报告_${img.name}.png`,
         dataUrl: img.data
       }))
     })
@@ -737,6 +745,10 @@ function AnnualReportWindow() {
   const topFriend = coreFriends[0]
   const mostActive = getMostActiveTime(activityHeatmap.data)
   const socialStoryName = topFriend?.displayName || '好友'
+  const yearTitle = formatYearLabel(year, true)
+  const yearTitleShort = formatYearLabel(year, false)
+  const monthlyTitle = year === 0 ? '全部时间月度好友' : `${year}年月度好友`
+  const phrasesTitle = year === 0 ? '你在全部时间的常用语' : `你在${year}年的年度常用语`
 
   return (
     <div className="annual-report-window">
@@ -827,7 +839,7 @@ function AnnualReportWindow() {
           {/* 封面 */}
           <section className="section" ref={sectionRefs.cover}>
             <div className="label-text">WEFLOW · ANNUAL REPORT</div>
-            <h1 className="hero-title">{year}年<br />微信聊天报告</h1>
+            <h1 className="hero-title">{yearTitle}<br />微信聊天报告</h1>
             <hr className="divider" />
             <p className="hero-desc">每一条消息背后<br />都藏着一段独特的故事</p>
           </section>
@@ -869,7 +881,7 @@ function AnnualReportWindow() {
           {/* 月度好友 */}
           <section className="section" ref={sectionRefs.monthlyFriends}>
             <div className="label-text">月度好友</div>
-            <h2 className="hero-title">{year}年月度好友</h2>
+            <h2 className="hero-title">{monthlyTitle}</h2>
             <p className="hero-desc">根据12个月的聊天习惯</p>
             <div className="monthly-orbit">
               {monthlyTopFriends.map((m, i) => (
@@ -1016,7 +1028,7 @@ function AnnualReportWindow() {
           {topPhrases && topPhrases.length > 0 && (
             <section className="section" ref={sectionRefs.topPhrases}>
               <div className="label-text">年度常用语</div>
-              <h2 className="hero-title">你在{year}年的年度常用语</h2>
+              <h2 className="hero-title">{phrasesTitle}</h2>
               <p className="hero-desc">
                 这一年，你说得最多的是：
                 <br />
@@ -1085,7 +1097,7 @@ function AnnualReportWindow() {
               <br />愿新的一年，
               <br />所有期待，皆有回声。
             </p>
-            <div className="ending-year">{year}</div>
+            <div className="ending-year">{yearTitleShort}</div>
             <div className="ending-brand">WEFLOW</div>
           </section>
         </div>

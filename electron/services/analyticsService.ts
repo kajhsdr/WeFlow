@@ -3,6 +3,7 @@ import { wcdbService } from './wcdbService'
 import { join } from 'path'
 import { readFile, writeFile, rm } from 'fs/promises'
 import { app } from 'electron'
+import { createHash } from 'crypto'
 
 export interface ChatStatistics {
   totalMessages: number
@@ -44,6 +45,58 @@ class AnalyticsService {
 
   constructor() {
     this.configService = new ConfigService()
+  }
+
+  private normalizeUsername(username: string): string {
+    return username.trim().toLowerCase()
+  }
+
+  private normalizeExcludedUsernames(value: unknown): string[] {
+    if (!Array.isArray(value)) return []
+    const normalized = value
+      .map((item) => typeof item === 'string' ? item.trim().toLowerCase() : '')
+      .filter((item) => item.length > 0)
+    return Array.from(new Set(normalized))
+  }
+
+  private getExcludedUsernamesList(): string[] {
+    return this.normalizeExcludedUsernames(this.configService.get('analyticsExcludedUsernames'))
+  }
+
+  private getExcludedUsernamesSet(): Set<string> {
+    return new Set(this.getExcludedUsernamesList())
+  }
+
+  private escapeSqlValue(value: string): string {
+    return value.replace(/'/g, "''")
+  }
+
+  private async getAliasMap(usernames: string[]): Promise<Record<string, string>> {
+    const map: Record<string, string> = {}
+    if (usernames.length === 0) return map
+
+    const chunkSize = 200
+    for (let i = 0; i < usernames.length; i += chunkSize) {
+      const chunk = usernames.slice(i, i + chunkSize)
+      const inList = chunk.map((u) => `'${this.escapeSqlValue(u)}'`).join(',')
+      if (!inList) continue
+      const sql = `
+        SELECT username, alias
+        FROM contact
+        WHERE username IN (${inList})
+      `
+      const result = await wcdbService.execQuery('contact', null, sql)
+      if (!result.success || !result.rows) continue
+      for (const row of result.rows as Record<string, any>[]) {
+        const username = row.username || ''
+        const alias = row.alias || ''
+        if (username && alias) {
+          map[username] = alias
+        }
+      }
+    }
+
+    return map
   }
 
   private cleanAccountDirName(name: string): string {
@@ -97,13 +150,15 @@ class AnalyticsService {
   }
 
   private async getPrivateSessions(
-    cleanedWxid: string
+    cleanedWxid: string,
+    excludedUsernames?: Set<string>
   ): Promise<{ usernames: string[]; numericIds: string[] }> {
     const sessionResult = await wcdbService.getSessions()
     if (!sessionResult.success || !sessionResult.sessions) {
       return { usernames: [], numericIds: [] }
     }
     const rows = sessionResult.sessions as Record<string, any>[]
+    const excluded = excludedUsernames ?? this.getExcludedUsernamesSet()
 
     const sample = rows[0]
     void sample
@@ -124,7 +179,11 @@ class AnalyticsService {
       return { username, idValue }
     })
     const usernames = sessions.map((s) => s.username)
-    const privateSessions = sessions.filter((s) => this.isPrivateSession(s.username, cleanedWxid))
+    const privateSessions = sessions.filter((s) => {
+      if (!this.isPrivateSession(s.username, cleanedWxid)) return false
+      if (excluded.size === 0) return true
+      return !excluded.has(this.normalizeUsername(s.username))
+    })
     const privateUsernames = privateSessions.map((s) => s.username)
     const numericIds = privateSessions
       .map((s) => s.idValue)
@@ -177,8 +236,12 @@ class AnalyticsService {
   }
 
   private buildAggregateCacheKey(sessionIds: string[], beginTimestamp: number, endTimestamp: number): string {
-    const sample = sessionIds.slice(0, 5).join(',')
-    return `${beginTimestamp}-${endTimestamp}-${sessionIds.length}-${sample}`
+    if (sessionIds.length === 0) {
+      return `${beginTimestamp}-${endTimestamp}-0-empty`
+    }
+    const normalized = Array.from(new Set(sessionIds.map((id) => String(id)))).sort()
+    const hash = createHash('sha1').update(normalized.join('|')).digest('hex').slice(0, 12)
+    return `${beginTimestamp}-${endTimestamp}-${normalized.length}-${hash}`
   }
 
   private async computeAggregateByCursor(sessionIds: string[], beginTimestamp = 0, endTimestamp = 0): Promise<any> {
@@ -367,6 +430,65 @@ class AnalyticsService {
       return { sessionId, success: countResult.success, count: countResult.count, error: countResult.error }
     }))
     void results
+  }
+
+  async getExcludedUsernames(): Promise<{ success: boolean; data?: string[]; error?: string }> {
+    try {
+      return { success: true, data: this.getExcludedUsernamesList() }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async setExcludedUsernames(usernames: string[]): Promise<{ success: boolean; data?: string[]; error?: string }> {
+    try {
+      const normalized = this.normalizeExcludedUsernames(usernames)
+      this.configService.set('analyticsExcludedUsernames', normalized)
+      await this.clearCache()
+      return { success: true, data: normalized }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async getExcludeCandidates(): Promise<{ success: boolean; data?: Array<{ username: string; displayName: string; avatarUrl?: string; wechatId?: string }>; error?: string }> {
+    try {
+      const conn = await this.ensureConnected()
+      if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
+
+      const excluded = this.getExcludedUsernamesSet()
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, new Set())
+
+      const usernames = new Set<string>(sessionInfo.usernames)
+      for (const name of excluded) usernames.add(name)
+
+      if (usernames.size === 0) {
+        return { success: true, data: [] }
+      }
+
+      const usernameList = Array.from(usernames)
+      const [displayNames, avatarUrls, aliasMap] = await Promise.all([
+        wcdbService.getDisplayNames(usernameList),
+        wcdbService.getAvatarUrls(usernameList),
+        this.getAliasMap(usernameList)
+      ])
+
+      const entries = usernameList.map((username) => {
+        const displayName = displayNames.success && displayNames.map
+          ? (displayNames.map[username] || username)
+          : username
+        const avatarUrl = avatarUrls.success && avatarUrls.map
+          ? avatarUrls.map[username]
+          : undefined
+        const alias = aliasMap[username]
+        const wechatId = alias || (!username.startsWith('wxid_') ? username : '')
+        return { username, displayName, avatarUrl, wechatId }
+      })
+
+      return { success: true, data: entries }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
   }
 
   async getOverallStatistics(force = false): Promise<{ success: boolean; data?: ChatStatistics; error?: string }> {

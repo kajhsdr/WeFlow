@@ -397,8 +397,10 @@ class AnnualReportService {
 
       this.reportProgress('加载会话列表...', 15, onProgress)
 
-      const startTime = Math.floor(new Date(year, 0, 1).getTime() / 1000)
-      const endTime = Math.floor(new Date(year, 11, 31, 23, 59, 59).getTime() / 1000)
+      const isAllTime = year <= 0
+      const reportYear = isAllTime ? 0 : year
+      const startTime = isAllTime ? 0 : Math.floor(new Date(year, 0, 1).getTime() / 1000)
+      const endTime = isAllTime ? 0 : Math.floor(new Date(year, 11, 31, 23, 59, 59).getTime() / 1000)
 
       let totalMessages = 0
       const contactStats = new Map<string, { sent: number; received: number }>()
@@ -902,7 +904,7 @@ class AnnualReportService {
           .map(([phrase, count]) => ({ phrase, count }))
 
       const reportData: AnnualReportData = {
-        year,
+        year: reportYear,
         totalMessages,
         totalFriends: contactStats.size,
         coreFriends,

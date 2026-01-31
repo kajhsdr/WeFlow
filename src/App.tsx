@@ -10,6 +10,8 @@ import AnalyticsPage from './pages/AnalyticsPage'
 import AnalyticsWelcomePage from './pages/AnalyticsWelcomePage'
 import AnnualReportPage from './pages/AnnualReportPage'
 import AnnualReportWindow from './pages/AnnualReportWindow'
+import DualReportPage from './pages/DualReportPage'
+import DualReportWindow from './pages/DualReportWindow'
 import AgreementPage from './pages/AgreementPage'
 import GroupAnalyticsPage from './pages/GroupAnalyticsPage'
 import SettingsPage from './pages/SettingsPage'
@@ -398,6 +400,8 @@ function App() {
               <Route path="/group-analytics" element={<GroupAnalyticsPage />} />
               <Route path="/annual-report" element={<AnnualReportPage />} />
               <Route path="/annual-report/view" element={<AnnualReportWindow />} />
+              <Route path="/dual-report" element={<DualReportPage />} />
+              <Route path="/dual-report/view" element={<DualReportWindow />} />
 
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/export" element={<ExportPage />} />

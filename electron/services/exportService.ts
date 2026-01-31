@@ -260,7 +260,7 @@ class ExportService {
         }
 
         // 清理昵称：去除前后空白和特殊字符
-        nickname = nickname.trim().replace(/[\x00-\x1F\x7F]/g, '')
+        nickname = this.normalizeGroupNickname(nickname)
 
         // 只保存有效的群昵称（长度 > 0 且 < 50）
         if (nickname && nickname.length > 0 && nickname.length < 50) {
@@ -430,6 +430,15 @@ class ExportService {
   private looksLikeHex(s: string): boolean {
     if (s.length % 2 !== 0) return false
     return /^[0-9a-fA-F]+$/.test(s)
+  }
+
+  private normalizeGroupNickname(value: string): string {
+    const trimmed = (value || '').trim()
+    if (!trimmed) return ''
+    const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '')
+    if (!cleaned) return ''
+    if (/^[,"'“”‘’，、]+$/.test(cleaned)) return ''
+    return cleaned
   }
 
   /**
@@ -2034,7 +2043,7 @@ class ExportService {
           ? contact.contact.nickName
           : (senderInfo.displayName || senderWxid)
         const senderRemark = contact.success && contact.contact?.remark ? contact.contact.remark : ''
-        const senderGroupNickname = groupNicknamesMap.get(senderWxid?.toLowerCase() || '') || ''
+        const senderGroupNickname = this.normalizeGroupNickname(groupNicknamesMap.get(senderWxid?.toLowerCase() || '') || '')
 
         // 使用用户偏好的显示名称
         const senderDisplayName = this.getPreferredDisplayName(
@@ -2080,7 +2089,7 @@ class ExportService {
         ? sessionContact.contact.remark
         : ''
       const sessionGroupNickname = isGroup
-        ? (groupNicknamesMap.get(sessionId.toLowerCase()) || '')
+        ? this.normalizeGroupNickname(groupNicknamesMap.get(sessionId.toLowerCase()) || '')
         : ''
 
       // 使用用户偏好的显示名称
@@ -2447,7 +2456,7 @@ class ExportService {
 
         // 获取群昵称 (仅群聊且完整列模式)
         if (isGroup && !useCompactColumns && senderWxid) {
-          senderGroupNickname = groupNicknamesMap.get(senderWxid.toLowerCase()) || ''
+          senderGroupNickname = this.normalizeGroupNickname(groupNicknamesMap.get(senderWxid.toLowerCase()) || '')
         }
 
 
