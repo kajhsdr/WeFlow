@@ -1,12 +1,15 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Calendar, Loader2, Sparkles } from 'lucide-react'
+import { Calendar, Loader2, Sparkles, Users } from 'lucide-react'
 import './AnnualReportPage.scss'
+
+type YearOption = number | 'all'
 
 function AnnualReportPage() {
   const navigate = useNavigate()
   const [availableYears, setAvailableYears] = useState<number[]>([])
-  const [selectedYear, setSelectedYear] = useState<number | null>(null)
+  const [selectedYear, setSelectedYear] = useState<YearOption | null>(null)
+  const [selectedPairYear, setSelectedPairYear] = useState<YearOption | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isGenerating, setIsGenerating] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -23,6 +26,7 @@ function AnnualReportPage() {
       if (result.success && result.data && result.data.length > 0) {
         setAvailableYears(result.data)
         setSelectedYear(result.data[0])
+        setSelectedPairYear(result.data[0])
       } else if (!result.success) {
         setLoadError(result.error || '加载年度数据失败')
       }
@@ -35,7 +39,7 @@ function AnnualReportPage() {
   }
 
   const handleGenerateReport = async () => {
-    if (!selectedYear) return
+    if (!selectedYear || selectedYear === 'all') return
     setIsGenerating(true)
     try {
       navigate(`/annual-report/view?year=${selectedYear}`)
@@ -67,42 +71,97 @@ function AnnualReportPage() {
     )
   }
 
+  const yearOptions: YearOption[] = availableYears.length > 0
+    ? ['all', ...availableYears]
+    : []
+
+  const getYearLabel = (value: YearOption | null) => {
+    if (!value) return ''
+    return value === 'all' ? '全部时间' : `${value} 年`
+  }
+
   return (
     <div className="annual-report-page">
       <Sparkles size={32} className="header-icon" />
       <h1 className="page-title">年度报告</h1>
       <p className="page-desc">选择年份，生成你的微信聊天年度回顾</p>
 
-      <div className="year-grid">
-        {availableYears.map(year => (
-          <div
-            key={year}
-            className={`year-card ${selectedYear === year ? 'selected' : ''}`}
-            onClick={() => setSelectedYear(year)}
-          >
-            <span className="year-number">{year}</span>
-            <span className="year-label">年</span>
+      <div className="report-sections">
+        <section className="report-section">
+          <div className="section-header">
+            <div>
+              <h2 className="section-title">总年度报告</h2>
+              <p className="section-desc">包含所有会话与消息</p>
+            </div>
           </div>
-        ))}
-      </div>
 
-      <button
-        className="generate-btn"
-        onClick={handleGenerateReport}
-        disabled={!selectedYear || isGenerating}
-      >
-        {isGenerating ? (
-          <>
-            <Loader2 size={20} className="spin" />
-            <span>正在生成...</span>
-          </>
-        ) : (
-          <>
-            <Sparkles size={20} />
-            <span>生成 {selectedYear} 年度报告</span>
-          </>
-        )}
-      </button>
+          <div className="year-grid">
+            {yearOptions.map(option => (
+              <div
+                key={option}
+                className={`year-card ${option === 'all' ? 'all-time' : ''} ${selectedYear === option ? 'selected' : ''}`}
+                onClick={() => setSelectedYear(option)}
+              >
+                <span className="year-number">{option === 'all' ? '全部' : option}</span>
+                <span className="year-label">{option === 'all' ? '时间' : '年'}</span>
+              </div>
+            ))}
+          </div>
+
+          <button
+            className="generate-btn"
+            onClick={handleGenerateReport}
+            disabled={!selectedYear || selectedYear === 'all' || isGenerating}
+          >
+            {isGenerating ? (
+              <>
+                <Loader2 size={20} className="spin" />
+                <span>正在生成...</span>
+              </>
+            ) : (
+              <>
+                <Sparkles size={20} />
+                <span>生成 {getYearLabel(selectedYear)} 年度报告</span>
+              </>
+            )}
+          </button>
+          {selectedYear === 'all' ? (
+            <p className="section-hint">全部时间报告功能准备中</p>
+          ) : null}
+        </section>
+
+        <section className="report-section">
+          <div className="section-header">
+            <div>
+              <h2 className="section-title">双人年度报告</h2>
+              <p className="section-desc">选择一位好友，只看你们的私聊</p>
+            </div>
+            <div className="section-badge">
+              <Users size={16} />
+              <span>私聊</span>
+            </div>
+          </div>
+
+          <div className="year-grid">
+            {yearOptions.map(option => (
+              <div
+                key={`pair-${option}`}
+                className={`year-card ${option === 'all' ? 'all-time' : ''} ${selectedPairYear === option ? 'selected' : ''}`}
+                onClick={() => setSelectedPairYear(option)}
+              >
+                <span className="year-number">{option === 'all' ? '全部' : option}</span>
+                <span className="year-label">{option === 'all' ? '时间' : '年'}</span>
+              </div>
+            ))}
+          </div>
+
+          <button className="generate-btn secondary" disabled>
+            <Users size={20} />
+            <span>选择好友并生成报告</span>
+          </button>
+          <p className="section-hint">双人年度报告入口已留出，功能在开发中</p>
+        </section>
+      </div>
     </div>
   )
 }
