@@ -58,6 +58,24 @@ export default defineConfig({
         }
       },
       {
+        entry: 'electron/dualReportWorker.ts',
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: [
+                'koffi',
+                'fsevents'
+              ],
+              output: {
+                entryFileNames: 'dualReportWorker.js',
+                inlineDynamicImports: true
+              }
+            }
+          }
+        }
+      },
+      {
         entry: 'electron/imageSearchWorker.ts',
         vite: {
           build: {

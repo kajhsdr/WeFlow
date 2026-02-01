@@ -208,145 +208,18 @@ class ExportService {
   }
 
   /**
-   * 解析 ext_buffer 二进制数据，提取群成员的群昵称
-   * ext_buffer 包含类似 protobuf 编码的数据，格式示例：
-   * wxid_xxx<binary>群昵称<binary>wxid_yyy<binary>群昵称...
-   */
-  private parseGroupNicknamesFromExtBuffer(buffer: Buffer): Map<string, string> {
-    const nicknameMap = new Map<string, string>()
-
-    try {
-      // 将 buffer 转为字符串，允许部分乱码
-      const raw = buffer.toString('utf8')
-
-      // 提取所有 wxid 格式的字符串: wxid_ 或 wxid_后跟字母数字下划线
-      const wxidPattern = /wxid_[a-z0-9_]+/gi
-      const wxids = raw.match(wxidPattern) || []
-
-      // 对每个 wxid，尝试提取其后的群昵称
-      for (const wxid of wxids) {
-        const wxidLower = wxid.toLowerCase()
-        const wxidIndex = raw.toLowerCase().indexOf(wxidLower)
-
-        if (wxidIndex === -1) continue
-
-        // 从 wxid 结束位置开始查找
-        const afterWxid = raw.slice(wxidIndex + wxid.length)
-
-        // 提取紧跟在 wxid 后面的可打印字符（中文、字母、数字等）
-        // 跳过前面的不可打印字符和特定控制字符
-        let nickname = ''
-        let foundStart = false
-
-        for (let i = 0; i < afterWxid.length && i < 100; i++) {
-          const char = afterWxid[i]
-          const code = char.charCodeAt(0)
-
-          // 判断是否为可打印字符（中文、字母、数字、常见符号）
-          const isPrintable = (
-            (code >= 0x4E00 && code <= 0x9FFF) ||  // 中文
-            (code >= 0x3000 && code <= 0x303F) ||  // CJK 符号
-            (code >= 0xFF00 && code <= 0xFFEF) ||  // 全角字符
-            (code >= 0x20 && code <= 0x7E)         // ASCII 可打印字符
-          )
-
-          if (isPrintable && code !== 0x01 && code !== 0x18) {
-            foundStart = true
-            nickname += char
-          } else if (foundStart) {
-            // 遇到不可打印字符，停止
-            break
-          }
-        }
-
-        // 清理昵称：去除前后空白和特殊字符
-        nickname = nickname.trim().replace(/[\x00-\x1F\x7F]/g, '')
-
-        // 只保存有效的群昵称（长度 > 0 且 < 50）
-        if (nickname && nickname.length > 0 && nickname.length < 50) {
-          nicknameMap.set(wxidLower, nickname)
-        }
-      }
-    } catch (e) {
-      // 解析失败时返回空 Map
-      console.error('Failed to parse ext_buffer:', e)
-    }
-
-    return nicknameMap
-  }
-
-  /**
-   * 从 contact.db 的 chat_room 表获取群成员的群昵称
-   * @param chatroomId 群聊ID (如 "xxxxx@chatroom")
-   * @returns Map<wxid, 群昵称>
+   * 从 DLL 获取群成员的群昵称
    */
   async getGroupNicknamesForRoom(chatroomId: string): Promise<Map<string, string>> {
-    console.log('========== getGroupNicknamesForRoom START ==========', chatroomId)
     try {
-      // 查询 contact.db 的 chat_room 表
-      // path设为null，因为contact.db已经随handle一起打开了
-      const sql = `SELECT ext_buffer FROM chat_room WHERE username = '${chatroomId.replace(/'/g, "''")}'`
-      console.log('执行SQL查询:', sql)
-
-      const result = await wcdbService.execQuery('contact', null, sql)
-      console.log('execQuery结果:', { success: result.success, rowCount: result.rows?.length, error: result.error })
-
-      if (!result.success || !result.rows || result.rows.length === 0) {
-        console.log('❌ 群昵称查询失败或无数据:', chatroomId, result.error)
-        return new Map<string, string>()
+      const result = await wcdbService.getGroupNicknames(chatroomId)
+      if (result.success && result.nicknames) {
+        return new Map(Object.entries(result.nicknames))
       }
-
-      let extBuffer = result.rows[0].ext_buffer
-      console.log('ext_buffer原始类型:', typeof extBuffer, 'isBuffer:', Buffer.isBuffer(extBuffer))
-
-      // execQuery返回的二进制数据会被编码为字符串（hex或base64）
-      // 需要转换回Buffer
-      if (typeof extBuffer === 'string') {
-        console.log('🔄 ext_buffer是字符串，尝试转换为Buffer...')
-
-        // 尝试判断是hex还是base64
-        if (this.looksLikeHex(extBuffer)) {
-          console.log('✅ 检测到hex编码，使用hex解码')
-          extBuffer = Buffer.from(extBuffer, 'hex')
-        } else if (this.looksLikeBase64(extBuffer)) {
-          console.log('✅ 检测到base64编码，使用base64解码')
-          extBuffer = Buffer.from(extBuffer, 'base64')
-        } else {
-          // 默认尝试hex
-          console.log(' 无法判断编码格式，默认尝试hex')
-          try {
-            extBuffer = Buffer.from(extBuffer, 'hex')
-          } catch (e) {
-            console.log('❌ hex解码失败，尝试base64')
-            extBuffer = Buffer.from(extBuffer, 'base64')
-          }
-        }
-        console.log('✅ 转换后的Buffer长度:', extBuffer.length)
-      }
-
-      if (!extBuffer || !Buffer.isBuffer(extBuffer)) {
-        console.log('❌ ext_buffer转换失败，不是Buffer类型:', typeof extBuffer)
-        return new Map<string, string>()
-      }
-
-      console.log('✅ 开始解析ext_buffer, 长度:', extBuffer.length)
-      const nicknamesMap = this.parseGroupNicknamesFromExtBuffer(extBuffer)
-      console.log('✅ 解析完成, 找到', nicknamesMap.size, '个群昵称')
-
-      // 打印前5个群昵称作为示例
-      let count = 0
-      for (const [wxid, nickname] of nicknamesMap.entries()) {
-        if (count++ < 5) {
-          console.log(`  - ${wxid}: "${nickname}"`)
-        }
-      }
-
-      return nicknamesMap
-    } catch (e) {
-      console.error('❌ getGroupNicknamesForRoom异常:', e)
       return new Map<string, string>()
-    } finally {
-      console.log('========== getGroupNicknamesForRoom END ==========')
+    } catch (e) {
+      console.error('getGroupNicknamesForRoom error:', e)
+      return new Map<string, string>()
     }
   }
 
@@ -430,6 +303,15 @@ class ExportService {
   private looksLikeHex(s: string): boolean {
     if (s.length % 2 !== 0) return false
     return /^[0-9a-fA-F]+$/.test(s)
+  }
+
+  private normalizeGroupNickname(value: string): string {
+    const trimmed = (value || '').trim()
+    if (!trimmed) return ''
+    const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '')
+    if (!cleaned) return ''
+    if (/^[,"'“”‘’，、]+$/.test(cleaned)) return ''
+    return cleaned
   }
 
   /**
@@ -1595,6 +1477,87 @@ class ExportService {
     return result
   }
 
+  /**
+   * 导出头像为外部文件（仅用于HTML格式）
+   * 将头像保存到 avatars/ 子目录，返回相对路径
+   */
+  private async exportAvatarsToFiles(
+    members: Array<{ username: string; avatarUrl?: string }>,
+    outputDir: string
+  ): Promise<Map<string, string>> {
+    const result = new Map<string, string>()
+    if (members.length === 0) return result
+
+    // 创建 avatars 子目录
+    const avatarsDir = path.join(outputDir, 'avatars')
+    if (!fs.existsSync(avatarsDir)) {
+      fs.mkdirSync(avatarsDir, { recursive: true })
+    }
+
+    for (const member of members) {
+      const fileInfo = this.resolveAvatarFile(member.avatarUrl)
+      if (!fileInfo) continue
+      try {
+        let data: Buffer | null = null
+        let mime = fileInfo.mime
+        if (fileInfo.data) {
+          data = fileInfo.data
+        } else if (fileInfo.sourcePath && fs.existsSync(fileInfo.sourcePath)) {
+          data = await fs.promises.readFile(fileInfo.sourcePath)
+        } else if (fileInfo.sourceUrl) {
+          const downloaded = await this.downloadToBuffer(fileInfo.sourceUrl)
+          if (downloaded) {
+            data = downloaded.data
+            mime = downloaded.mime || mime
+          }
+        }
+        if (!data) continue
+
+        // 优先使用内容检测出的 MIME 类型
+        const detectedMime = this.detectMimeType(data)
+        const finalMime = detectedMime || mime || this.inferImageMime(fileInfo.ext)
+
+        // 根据 MIME 类型确定文件扩展名
+        const ext = this.getExtensionFromMime(finalMime)
+
+        // 清理用户名作为文件名（移除非法字符，限制长度）
+        const sanitizedUsername = member.username
+          .replace(/[<>:"/\\|?*@]/g, '_')
+          .substring(0, 100)
+
+        const filename = `${sanitizedUsername}${ext}`
+        const avatarPath = path.join(avatarsDir, filename)
+
+        // 保存头像文件
+        await fs.promises.writeFile(avatarPath, data)
+
+        // 返回相对路径
+        result.set(member.username, `avatars/${filename}`)
+      } catch {
+        continue
+      }
+    }
+
+    return result
+  }
+
+  private getExtensionFromMime(mime: string): string {
+    switch (mime) {
+      case 'image/png':
+        return '.png'
+      case 'image/gif':
+        return '.gif'
+      case 'image/webp':
+        return '.webp'
+      case 'image/bmp':
+        return '.bmp'
+      case 'image/jpeg':
+      default:
+        return '.jpg'
+    }
+  }
+
+
   private detectMimeType(buffer: Buffer): string | null {
     if (buffer.length < 4) return null
 
@@ -2034,7 +1997,7 @@ class ExportService {
           ? contact.contact.nickName
           : (senderInfo.displayName || senderWxid)
         const senderRemark = contact.success && contact.contact?.remark ? contact.contact.remark : ''
-        const senderGroupNickname = groupNicknamesMap.get(senderWxid?.toLowerCase() || '') || ''
+        const senderGroupNickname = this.normalizeGroupNickname(groupNicknamesMap.get(senderWxid?.toLowerCase() || '') || '')
 
         // 使用用户偏好的显示名称
         const senderDisplayName = this.getPreferredDisplayName(
@@ -2080,7 +2043,7 @@ class ExportService {
         ? sessionContact.contact.remark
         : ''
       const sessionGroupNickname = isGroup
-        ? (groupNicknamesMap.get(sessionId.toLowerCase()) || '')
+        ? this.normalizeGroupNickname(groupNicknamesMap.get(sessionId.toLowerCase()) || '')
         : ''
 
       // 使用用户偏好的显示名称
@@ -2320,11 +2283,9 @@ class ExportService {
       }
 
       // 预加载群昵称 (仅群聊且完整列模式)
-      console.log('预加载群昵称检查: isGroup=', isGroup, 'useCompactColumns=', useCompactColumns, 'sessionId=', sessionId)
       const groupNicknamesMap = (isGroup && !useCompactColumns)
         ? await this.getGroupNicknamesForRoom(sessionId)
         : new Map<string, string>()
-      console.log('群昵称Map大小:', groupNicknamesMap.size)
 
 
       // 填充数据
@@ -2447,7 +2408,7 @@ class ExportService {
 
         // 获取群昵称 (仅群聊且完整列模式)
         if (isGroup && !useCompactColumns && senderWxid) {
-          senderGroupNickname = groupNicknamesMap.get(senderWxid.toLowerCase()) || ''
+          senderGroupNickname = this.normalizeGroupNickname(groupNicknamesMap.get(senderWxid.toLowerCase()) || '')
         }
 
 
@@ -2466,11 +2427,11 @@ class ExportService {
           )
           : (mediaItem?.relativePath
             || this.formatPlainExportContent(
-            msg.content,
-            msg.localType,
-            options,
-            voiceTranscriptMap.get(msg.localId)
-          ))
+              msg.content,
+              msg.localType,
+              options,
+              voiceTranscriptMap.get(msg.localId)
+            ))
 
         // 调试日志
         if (msg.localType === 3 || msg.localType === 47) {
@@ -2715,11 +2676,11 @@ class ExportService {
           )
           : (mediaItem?.relativePath
             || this.formatPlainExportContent(
-            msg.content,
-            msg.localType,
-            options,
-            voiceTranscriptMap.get(msg.localId)
-          ))
+              msg.content,
+              msg.localType,
+              options,
+              voiceTranscriptMap.get(msg.localId)
+            ))
 
         let senderRole: string
         let senderWxid: string
@@ -2892,7 +2853,7 @@ class ExportService {
       }
 
       const avatarMap = options.exportAvatars
-        ? await this.exportAvatars(
+        ? await this.exportAvatarsToFiles(
           [
             ...Array.from(collected.memberSet.entries()).map(([username, info]) => ({
               username,
@@ -2900,7 +2861,8 @@ class ExportService {
             })),
             { username: sessionId, avatarUrl: sessionInfo.avatarUrl },
             { username: cleanedMyWxid, avatarUrl: myInfo.avatarUrl }
-          ]
+          ],
+          path.dirname(outputPath)
         )
         : new Map<string, string>()
 
@@ -2917,7 +2879,7 @@ class ExportService {
             : (sessionInfo.displayName || sessionId))
         const avatarData = avatarMap.get(isSenderMe ? cleanedMyWxid : msg.senderUsername)
         const avatarHtml = avatarData
-          ? `<img src="${this.escapeAttribute(avatarData)}" alt="${this.escapeAttribute(senderName)}" />`
+          ? `<img src="${this.escapeAttribute(encodeURI(avatarData))}" alt="${this.escapeAttribute(senderName)}" />`
           : `<span>${this.escapeHtml(this.getAvatarFallback(senderName))}</span>`
 
         const timeText = this.formatTimestamp(msg.createTime)

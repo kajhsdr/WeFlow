@@ -1,20 +1,51 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Users, Clock, MessageSquare, Send, Inbox, Calendar, Loader2, RefreshCw, User, Medal } from 'lucide-react'
+import { Users, Clock, MessageSquare, Send, Inbox, Calendar, Loader2, RefreshCw, Medal, UserMinus, Search, X } from 'lucide-react'
 import ReactECharts from 'echarts-for-react'
 import { useAnalyticsStore } from '../stores/analyticsStore'
 import { useThemeStore } from '../stores/themeStore'
 import './AnalyticsPage.scss'
 import { Avatar } from '../components/Avatar'
 
+interface ExcludeCandidate {
+  username: string
+  displayName: string
+  avatarUrl?: string
+  wechatId?: string
+}
+
+const normalizeUsername = (value: string) => value.trim().toLowerCase()
+
 function AnalyticsPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [loadingStatus, setLoadingStatus] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState(0)
+  const [isExcludeDialogOpen, setIsExcludeDialogOpen] = useState(false)
+  const [excludeCandidates, setExcludeCandidates] = useState<ExcludeCandidate[]>([])
+  const [excludeQuery, setExcludeQuery] = useState('')
+  const [excludeLoading, setExcludeLoading] = useState(false)
+  const [excludeError, setExcludeError] = useState<string | null>(null)
+  const [excludedUsernames, setExcludedUsernames] = useState<Set<string>>(new Set())
+  const [draftExcluded, setDraftExcluded] = useState<Set<string>>(new Set())
 
   const themeMode = useThemeStore((state) => state.themeMode)
-  const { statistics, rankings, timeDistribution, isLoaded, setStatistics, setRankings, setTimeDistribution, markLoaded } = useAnalyticsStore()
+  const { statistics, rankings, timeDistribution, isLoaded, setStatistics, setRankings, setTimeDistribution, markLoaded, clearCache } = useAnalyticsStore()
+
+  const loadExcludedUsernames = useCallback(async () => {
+    try {
+      const result = await window.electronAPI.analytics.getExcludedUsernames()
+      if (result.success && result.data) {
+        setExcludedUsernames(new Set(result.data.map(normalizeUsername)))
+      } else {
+        setExcludedUsernames(new Set())
+      }
+    } catch (e) {
+      console.warn('加载排除名单失败', e)
+      setExcludedUsernames(new Set())
+    }
+  }, [])
+
   const loadData = useCallback(async (forceRefresh = false) => {
     if (isLoaded && !forceRefresh) return
     setIsLoading(true)
@@ -65,13 +96,88 @@ function AnalyticsPage() {
 
   useEffect(() => {
     const handleChange = () => {
+      loadExcludedUsernames()
       loadData(true)
     }
     window.addEventListener('wxid-changed', handleChange as EventListener)
     return () => window.removeEventListener('wxid-changed', handleChange as EventListener)
-  }, [loadData])
+  }, [loadData, loadExcludedUsernames])
+
+  useEffect(() => {
+    loadExcludedUsernames()
+  }, [loadExcludedUsernames])
 
   const handleRefresh = () => loadData(true)
+
+  const loadExcludeCandidates = useCallback(async () => {
+    setExcludeLoading(true)
+    setExcludeError(null)
+    try {
+      const result = await window.electronAPI.analytics.getExcludeCandidates()
+      if (result.success && result.data) {
+        setExcludeCandidates(result.data)
+      } else {
+        setExcludeError(result.error || '加载好友列表失败')
+      }
+    } catch (e) {
+      setExcludeError(String(e))
+    } finally {
+      setExcludeLoading(false)
+    }
+  }, [])
+
+  const openExcludeDialog = async () => {
+    setExcludeQuery('')
+    setDraftExcluded(new Set(excludedUsernames))
+    setIsExcludeDialogOpen(true)
+    await loadExcludeCandidates()
+  }
+
+  const toggleExcluded = (username: string) => {
+    const key = normalizeUsername(username)
+    setDraftExcluded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
+      }
+      return next
+    })
+  }
+
+  const handleApplyExcluded = async () => {
+    const payload = Array.from(draftExcluded)
+    setIsExcludeDialogOpen(false)
+    try {
+      const result = await window.electronAPI.analytics.setExcludedUsernames(payload)
+      if (!result.success) {
+        alert(result.error || '更新排除名单失败')
+        return
+      }
+      setExcludedUsernames(new Set((result.data || payload).map(normalizeUsername)))
+      clearCache()
+      await window.electronAPI.cache.clearAnalytics()
+      await loadData(true)
+    } catch (e) {
+      alert(`更新排除名单失败：${String(e)}`)
+    }
+  }
+
+  const visibleExcludeCandidates = excludeCandidates
+    .filter((candidate) => {
+      const query = excludeQuery.trim().toLowerCase()
+      if (!query) return true
+      const wechatId = candidate.wechatId || ''
+      const haystack = `${candidate.displayName} ${candidate.username} ${wechatId}`.toLowerCase()
+      return haystack.includes(query)
+    })
+    .sort((a, b) => {
+      const aSelected = draftExcluded.has(normalizeUsername(a.username))
+      const bSelected = draftExcluded.has(normalizeUsername(b.username))
+      if (aSelected !== bSelected) return aSelected ? -1 : 1
+      return a.displayName.localeCompare(b.displayName, 'zh')
+    })
 
   const formatDate = (timestamp: number | null) => {
     if (!timestamp) return '-'
@@ -247,10 +353,16 @@ function AnalyticsPage() {
     <>
       <div className="page-header">
         <h1>私聊分析</h1>
-        <button className="btn btn-secondary" onClick={handleRefresh} disabled={isLoading}>
-          <RefreshCw size={16} className={isLoading ? 'spin' : ''} />
-          {isLoading ? '刷新中...' : '刷新'}
-        </button>
+        <div className="header-actions">
+          <button className="btn btn-secondary" onClick={handleRefresh} disabled={isLoading}>
+            <RefreshCw size={16} className={isLoading ? 'spin' : ''} />
+            {isLoading ? '刷新中...' : '刷新'}
+          </button>
+          <button className="btn btn-secondary" onClick={openExcludeDialog}>
+            <UserMinus size={16} />
+            排除好友{excludedUsernames.size > 0 ? ` (${excludedUsernames.size})` : ''}
+          </button>
+        </div>
       </div>
       <div className="page-scroll">
         <section className="page-section">
@@ -316,6 +428,84 @@ function AnalyticsPage() {
           </div>
         </section>
       </div>
+      {isExcludeDialogOpen && (
+        <div className="exclude-modal-overlay" onClick={() => setIsExcludeDialogOpen(false)}>
+          <div className="exclude-modal" onClick={e => e.stopPropagation()}>
+            <div className="exclude-modal-header">
+              <h3>选择不统计的好友</h3>
+              <button className="modal-close" onClick={() => setIsExcludeDialogOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="exclude-modal-search">
+              <Search size={16} />
+              <input
+                type="text"
+                placeholder="搜索好友"
+                value={excludeQuery}
+                onChange={e => setExcludeQuery(e.target.value)}
+                disabled={excludeLoading}
+              />
+              {excludeQuery && (
+                <button className="clear-search" onClick={() => setExcludeQuery('')}>
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+            <div className="exclude-modal-body">
+              {excludeLoading && (
+                <div className="exclude-loading">
+                  <Loader2 size={20} className="spin" />
+                  <span>正在加载好友列表...</span>
+                </div>
+              )}
+              {!excludeLoading && excludeError && (
+                <div className="exclude-error">{excludeError}</div>
+              )}
+              {!excludeLoading && !excludeError && (
+                <div className="exclude-list">
+                  {visibleExcludeCandidates.map((candidate) => {
+                    const isChecked = draftExcluded.has(normalizeUsername(candidate.username))
+                    const wechatId = candidate.wechatId?.trim() || candidate.username
+                    return (
+                      <label key={candidate.username} className={`exclude-item ${isChecked ? 'active' : ''}`}>
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleExcluded(candidate.username)}
+                        />
+                        <div className="exclude-avatar">
+                          <Avatar src={candidate.avatarUrl} name={candidate.displayName} size={32} />
+                        </div>
+                        <div className="exclude-info">
+                          <span className="exclude-name">{candidate.displayName}</span>
+                          <span className="exclude-username">{wechatId}</span>
+                        </div>
+                      </label>
+                    )
+                  })}
+                  {visibleExcludeCandidates.length === 0 && (
+                    <div className="exclude-empty">
+                      {excludeQuery.trim() ? '未找到匹配好友' : '暂无可选好友'}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="exclude-modal-footer">
+              <span className="exclude-count">已排除 {draftExcluded.size} 人</span>
+              <div className="exclude-actions">
+                <button className="btn btn-secondary" onClick={() => setIsExcludeDialogOpen(false)}>
+                  取消
+                </button>
+                <button className="btn btn-primary" onClick={handleApplyExcluded} disabled={excludeLoading}>
+                  应用
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }

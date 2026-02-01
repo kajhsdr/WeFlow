@@ -27,6 +27,7 @@ interface ConfigSchema {
   autoTranscribeVoice: boolean
   transcribeLanguages: string[]
   exportDefaultConcurrency: number
+  analyticsExcludedUsernames: string[]
 
   // 安全相关
   authEnabled: boolean
@@ -62,6 +63,7 @@ export class ConfigService {
         autoTranscribeVoice: false,
         transcribeLanguages: ['zh'],
         exportDefaultConcurrency: 2,
+        analyticsExcludedUsernames: [],
 
         authEnabled: false,
         authPassword: '',

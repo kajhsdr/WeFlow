@@ -229,6 +229,11 @@ export class WcdbService {
     return this.callWorker('getGroupMembers', { chatroomId })
   }
 
+  // 获取群成员群名片昵称
+  async getGroupNicknames(chatroomId: string): Promise<{ success: boolean; nicknames?: Record<string, string>; error?: string }> {
+    return this.callWorker('getGroupNicknames', { chatroomId })
+  }
+
   /**
    * 获取消息表列表
    */
@@ -367,6 +372,20 @@ export class WcdbService {
    */
   async getSnsTimeline(limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number): Promise<{ success: boolean; timeline?: any[]; error?: string }> {
     return this.callWorker('getSnsTimeline', { limit, offset, usernames, keyword, startTime, endTime })
+  }
+
+  /**
+   * 获取朋友圈年度统计
+   */
+  async getSnsAnnualStats(beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; data?: any; error?: string }> {
+    return this.callWorker('getSnsAnnualStats', { beginTimestamp, endTimestamp })
+  }
+
+  /**
+   * 获取 DLL 内部日志
+   */
+  async getLogs(): Promise<{ success: boolean; logs?: string[]; error?: string }> {
+    return this.callWorker('getLogs')
   }
 
   /**

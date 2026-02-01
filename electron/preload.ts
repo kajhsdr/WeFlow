@@ -162,9 +162,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 数据分析
   analytics: {
-    getOverallStatistics: () => ipcRenderer.invoke('analytics:getOverallStatistics'),
+    getOverallStatistics: (force?: boolean) => ipcRenderer.invoke('analytics:getOverallStatistics', force),
     getContactRankings: (limit?: number) => ipcRenderer.invoke('analytics:getContactRankings', limit),
     getTimeDistribution: () => ipcRenderer.invoke('analytics:getTimeDistribution'),
+    getExcludedUsernames: () => ipcRenderer.invoke('analytics:getExcludedUsernames'),
+    setExcludedUsernames: (usernames: string[]) => ipcRenderer.invoke('analytics:setExcludedUsernames', usernames),
+    getExcludeCandidates: () => ipcRenderer.invoke('analytics:getExcludeCandidates'),
     onProgress: (callback: (payload: { status: string; progress: number }) => void) => {
       ipcRenderer.on('analytics:progress', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('analytics:progress')
@@ -197,6 +200,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onProgress: (callback: (payload: { status: string; progress: number }) => void) => {
       ipcRenderer.on('annualReport:progress', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('annualReport:progress')
+    }
+  },
+  dualReport: {
+    generateReport: (payload: { friendUsername: string; year: number }) =>
+      ipcRenderer.invoke('dualReport:generateReport', payload),
+    onProgress: (callback: (payload: { status: string; progress: number }) => void) => {
+      ipcRenderer.on('dualReport:progress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('dualReport:progress')
     }
   },
 

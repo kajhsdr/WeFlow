@@ -175,6 +175,26 @@ export interface ElectronAPI {
       }
       error?: string
     }>
+    getExcludedUsernames: () => Promise<{
+      success: boolean
+      data?: string[]
+      error?: string
+    }>
+    setExcludedUsernames: (usernames: string[]) => Promise<{
+      success: boolean
+      data?: string[]
+      error?: string
+    }>
+    getExcludeCandidates: () => Promise<{
+      success: boolean
+      data?: Array<{
+        username: string
+        displayName: string
+        avatarUrl?: string
+        wechatId?: string
+      }>
+      error?: string
+    }>
     onProgress: (callback: (payload: { status: string; progress: number }) => void) => () => void
   }
   cache: {
@@ -199,6 +219,10 @@ export interface ElectronAPI {
         username: string
         displayName: string
         avatarUrl?: string
+        nickname?: string
+        alias?: string
+        remark?: string
+        groupNickname?: string
       }>
       error?: string
     }>
@@ -313,6 +337,57 @@ export interface ElectronAPI {
     exportImages: (payload: { baseDir: string; folderName: string; images: Array<{ name: string; dataUrl: string }> }) => Promise<{
       success: boolean
       dir?: string
+      error?: string
+    }>
+    onProgress: (callback: (payload: { status: string; progress: number }) => void) => () => void
+  }
+  dualReport: {
+    generateReport: (payload: { friendUsername: string; year: number }) => Promise<{
+      success: boolean
+      data?: {
+        year: number
+        selfName: string
+        friendUsername: string
+        friendName: string
+        firstChat: {
+          createTime: number
+          createTimeStr: string
+          content: string
+          isSentByMe: boolean
+          senderUsername?: string
+        } | null
+        firstChatMessages?: Array<{
+          content: string
+          isSentByMe: boolean
+          createTime: number
+          createTimeStr: string
+        }>
+        yearFirstChat?: {
+          createTime: number
+          createTimeStr: string
+          content: string
+          isSentByMe: boolean
+          friendName: string
+          firstThreeMessages: Array<{
+            content: string
+            isSentByMe: boolean
+            createTime: number
+            createTimeStr: string
+          }>
+        } | null
+        stats: {
+          totalMessages: number
+          totalWords: number
+          imageCount: number
+          voiceCount: number
+          emojiCount: number
+          myTopEmojiMd5?: string
+          friendTopEmojiMd5?: string
+          myTopEmojiUrl?: string
+          friendTopEmojiUrl?: string
+        }
+        topPhrases: Array<{ phrase: string; count: number }>
+      }
       error?: string
     }>
     onProgress: (callback: (payload: { status: string; progress: number }) => void) => () => void

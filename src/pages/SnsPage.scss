@@ -547,10 +547,41 @@
         .sns-content-wrapper {
             flex: 1;
             display: flex;
+            flex-direction: column;
             overflow: hidden;
             position: relative;
         }
 
+        .sns-notice-banner {
+            margin: 16px 24px 0 24px;
+            padding: 10px 16px;
+            background: rgba(var(--accent-color-rgb), 0.08);
+            border-radius: 10px;
+            border: 1px solid rgba(var(--accent-color-rgb), 0.2);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--accent-color);
+            font-size: 13px;
+            font-weight: 500;
+            animation: banner-slide-down 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+
+            svg {
+                flex-shrink: 0;
+            }
+        }
+
+        @keyframes banner-slide-down {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
 
         .sns-content {
             flex: 1;

@@ -35,6 +35,7 @@ export class WcdbCore {
   private wcdbGetGroupMemberCount: any = null
   private wcdbGetGroupMemberCounts: any = null
   private wcdbGetGroupMembers: any = null
+  private wcdbGetGroupNicknames: any = null
   private wcdbGetMessageTables: any = null
   private wcdbGetMessageMeta: any = null
   private wcdbGetContact: any = null
@@ -57,6 +58,7 @@ export class WcdbCore {
   private wcdbGetDbStatus: any = null
   private wcdbGetVoiceData: any = null
   private wcdbGetSnsTimeline: any = null
+  private wcdbGetSnsAnnualStats: any = null
   private wcdbVerifyUser: any = null
   private avatarUrlCache: Map<string, { url?: string; updatedAt: number }> = new Map()
   private readonly avatarCacheTtlMs = 10 * 60 * 1000
@@ -333,6 +335,13 @@ export class WcdbCore {
       // wcdb_status wcdb_get_group_members(wcdb_handle handle, const char* chatroom_id, char** out_json)
       this.wcdbGetGroupMembers = this.lib.func('int32 wcdb_get_group_members(int64 handle, const char* chatroomId, _Out_ void** outJson)')
 
+      // wcdb_status wcdb_get_group_nicknames(wcdb_handle handle, const char* chatroom_id, char** out_json)
+      try {
+        this.wcdbGetGroupNicknames = this.lib.func('int32 wcdb_get_group_nicknames(int64 handle, const char* chatroomId, _Out_ void** outJson)')
+      } catch {
+        this.wcdbGetGroupNicknames = null
+      }
+
       // wcdb_status wcdb_get_message_tables(wcdb_handle handle, const char* session_id, char** out_json)
       this.wcdbGetMessageTables = this.lib.func('int32 wcdb_get_message_tables(int64 handle, const char* sessionId, _Out_ void** outJson)')
 
@@ -367,6 +376,13 @@ export class WcdbCore {
         this.wcdbGetAnnualReportExtras = this.lib.func('int32 wcdb_get_annual_report_extras(int64 handle, const char* sessionIdsJson, int32 begin, int32 end, int32 peakBegin, int32 peakEnd, _Out_ void** outJson)')
       } catch {
         this.wcdbGetAnnualReportExtras = null
+      }
+
+      // wcdb_status wcdb_get_logs(char** out_json)
+      try {
+        this.wcdbGetLogs = this.lib.func('int32 wcdb_get_logs(_Out_ void** outJson)')
+      } catch {
+        this.wcdbGetLogs = null
       }
 
       // wcdb_status wcdb_get_group_stats(wcdb_handle handle, const char* chatroom_id, int32_t begin_timestamp, int32_t end_timestamp, char** out_json)
@@ -429,6 +445,13 @@ export class WcdbCore {
         this.wcdbGetSnsTimeline = this.lib.func('int32 wcdb_get_sns_timeline(int64 handle, int32 limit, int32 offset, const char* username, const char* keyword, int32 startTime, int32 endTime, _Out_ void** outJson)')
       } catch {
         this.wcdbGetSnsTimeline = null
+      }
+
+      // wcdb_status wcdb_get_sns_annual_stats(wcdb_handle handle, int32_t begin_timestamp, int32_t end_timestamp, char** out_json)
+      try {
+        this.wcdbGetSnsAnnualStats = this.lib.func('int32 wcdb_get_sns_annual_stats(int64 handle, int32 begin, int32 end, _Out_ void** outJson)')
+      } catch {
+        this.wcdbGetSnsAnnualStats = null
       }
 
       // void VerifyUser(int64_t hwnd_ptr, const char* message, char* out_result, int max_len)
@@ -1002,6 +1025,28 @@ export class WcdbCore {
     }
   }
 
+  async getGroupNicknames(chatroomId: string): Promise<{ success: boolean; nicknames?: Record<string, string>; error?: string }> {
+    if (!this.ensureReady()) {
+      return { success: false, error: 'WCDB 未连接' }
+    }
+    if (!this.wcdbGetGroupNicknames) {
+      return { success: false, error: '当前 DLL 版本不支持获取群昵称接口' }
+    }
+    try {
+      const outPtr = [null as any]
+      const result = this.wcdbGetGroupNicknames(this.handle, chatroomId, outPtr)
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `获取群昵称失败: ${result}` }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: '解析群昵称失败' }
+      const nicknames = JSON.parse(jsonStr)
+      return { success: true, nicknames }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
   async getMessageTables(sessionId: string): Promise<{ success: boolean; tables?: any[]; error?: string }> {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
@@ -1343,13 +1388,31 @@ export class WcdbCore {
     }
   }
 
+  async getLogs(): Promise<{ success: boolean; logs?: string[]; error?: string }> {
+    if (!this.lib) return { success: false, error: 'DLL 未加载' }
+    if (!this.wcdbGetLogs) return { success: false, error: '接口未就绪' }
+    try {
+      const outPtr = [null as any]
+      const result = this.wcdbGetLogs(outPtr)
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `获取日志失败: ${result}` }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: '解析日志失败' }
+      return { success: true, logs: JSON.parse(jsonStr) }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
   async execQuery(kind: string, path: string | null, sql: string): Promise<{ success: boolean; rows?: any[]; error?: string }> {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
+      if (!this.wcdbExecQuery) return { success: false, error: '接口未就绪' }
       const outPtr = [null as any]
-      const result = this.wcdbExecQuery(this.handle, kind, path, sql, outPtr)
+      const result = this.wcdbExecQuery(this.handle, kind, path || '', sql, outPtr)
       if (result !== 0 || !outPtr[0]) {
         return { success: false, error: `执行查询失败: ${result}` }
       }
@@ -1499,6 +1562,31 @@ export class WcdbCore {
       const timeline = JSON.parse(jsonStr)
       return { success: true, timeline }
     } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async getSnsAnnualStats(beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; data?: any; error?: string }> {
+    if (!this.ensureReady()) {
+      return { success: false, error: 'WCDB 未连接' }
+    }
+    try {
+      if (!this.wcdbGetSnsAnnualStats) {
+        return { success: false, error: 'wcdbGetSnsAnnualStats 未找到' }
+      }
+      await new Promise(resolve => setImmediate(resolve))
+      const outPtr = [null as any]
+      const result = this.wcdbGetSnsAnnualStats(this.handle, beginTimestamp, endTimestamp, outPtr)
+      await new Promise(resolve => setImmediate(resolve))
+
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `getSnsAnnualStats failed: ${result}` }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: 'Failed to decode JSON' }
+      return { success: true, data: JSON.parse(jsonStr) }
+    } catch (e) {
+      console.error('getSnsAnnualStats 异常:', e)
       return { success: false, error: String(e) }
     }
   }

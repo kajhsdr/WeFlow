@@ -16,6 +16,10 @@ interface GroupMember {
   username: string
   displayName: string
   avatarUrl?: string
+  nickname?: string
+  alias?: string
+  remark?: string
+  groupNickname?: string
 }
 
 interface GroupMessageRank {
@@ -298,6 +302,10 @@ function GroupAnalyticsPage() {
 
   const renderMemberModal = () => {
     if (!selectedMember) return null
+    const nickname = (selectedMember.nickname || '').trim()
+    const alias = (selectedMember.alias || '').trim()
+    const remark = (selectedMember.remark || '').trim()
+    const groupNickname = (selectedMember.groupNickname || '').trim()
 
     return (
       <div className="member-modal-overlay" onClick={() => setSelectedMember(null)}>
@@ -320,11 +328,40 @@ function GroupAnalyticsPage() {
               </div>
               <div className="detail-row">
                 <span className="detail-label">昵称</span>
-                <span className="detail-value">{selectedMember.displayName}</span>
-                <button className="copy-btn" onClick={() => handleCopy(selectedMember.displayName, 'displayName')}>
-                  {copiedField === 'displayName' ? <Check size={14} /> : <Copy size={14} />}
-                </button>
+                <span className="detail-value">{nickname || '未设置'}</span>
+                {nickname && (
+                  <button className="copy-btn" onClick={() => handleCopy(nickname, 'nickname')}>
+                    {copiedField === 'nickname' ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                )}
               </div>
+              {alias && (
+                <div className="detail-row">
+                  <span className="detail-label">微信号</span>
+                  <span className="detail-value">{alias}</span>
+                  <button className="copy-btn" onClick={() => handleCopy(alias, 'alias')}>
+                    {copiedField === 'alias' ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                </div>
+              )}
+              {groupNickname && (
+                <div className="detail-row">
+                  <span className="detail-label">群昵称</span>
+                  <span className="detail-value">{groupNickname}</span>
+                  <button className="copy-btn" onClick={() => handleCopy(groupNickname, 'groupNickname')}>
+                    {copiedField === 'groupNickname' ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                </div>
+              )}
+              {remark && (
+                <div className="detail-row">
+                  <span className="detail-label">备注</span>
+                  <span className="detail-value">{remark}</span>
+                  <button className="copy-btn" onClick={() => handleCopy(remark, 'remark')}>
+                    {copiedField === 'remark' ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

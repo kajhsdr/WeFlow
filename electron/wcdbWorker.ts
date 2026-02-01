@@ -56,6 +56,9 @@ if (parentPort) {
                 case 'getGroupMembers':
                     result = await core.getGroupMembers(payload.chatroomId)
                     break
+                case 'getGroupNicknames':
+                    result = await core.getGroupNicknames(payload.chatroomId)
+                    break
                 case 'getMessageTables':
                     result = await core.getMessageTables(payload.sessionId)
                     break
@@ -118,6 +121,12 @@ if (parentPort) {
                     break
                 case 'getSnsTimeline':
                     result = await core.getSnsTimeline(payload.limit, payload.offset, payload.usernames, payload.keyword, payload.startTime, payload.endTime)
+                    break
+                case 'getSnsAnnualStats':
+                    result = await core.getSnsAnnualStats(payload.beginTimestamp, payload.endTimestamp)
+                    break
+                case 'getLogs':
+                    result = await core.getLogs()
                     break
                 case 'verifyUser':
                     result = await core.verifyUser(payload.message, payload.hwnd)
