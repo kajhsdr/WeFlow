@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Link, Mic, CheckCircle, Copy, Check } from 'lucide-react'
+import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Link, Mic, CheckCircle, Copy, Check, Download } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { useChatStore } from '../stores/chatStore'
 import { useBatchTranscribeStore } from '../stores/batchTranscribeStore'
@@ -117,6 +118,8 @@ const SessionItem = React.memo(function SessionItem({
 
 
 function ChatPage(_props: ChatPageProps) {
+  const navigate = useNavigate()
+
   const {
     isConnected,
     isConnecting,
@@ -1228,7 +1231,7 @@ function ChatPage(_props: ChatPageProps) {
       return
     }
 
-    const voiceMessages = result.messages
+    const voiceMessages: Message[] = result.messages
     if (voiceMessages.length === 0) {
       alert('当前会话没有语音消息')
       return
@@ -1244,6 +1247,15 @@ function ChatPage(_props: ChatPageProps) {
     setBatchSelectedDates(new Set(sortedDates))
     setShowBatchConfirm(true)
   }, [sessions, currentSessionId, isBatchTranscribing])
+
+  const handleExportCurrentSession = useCallback(() => {
+    if (!currentSessionId) return
+    navigate('/export', {
+      state: {
+        preselectSessionIds: [currentSessionId]
+      }
+    })
+  }, [currentSessionId, navigate])
 
   // 确认批量转写
   const confirmBatchTranscribe = useCallback(async () => {
@@ -1465,6 +1477,14 @@ function ChatPage(_props: ChatPageProps) {
                 )}
               </div>
               <div className="header-actions">
+                <button
+                  className="icon-btn export-session-btn"
+                  onClick={handleExportCurrentSession}
+                  disabled={!currentSessionId}
+                  title="导出当前会话"
+                >
+                  <Download size={18} />
+                </button>
                 <button
                   className={`icon-btn batch-transcribe-btn${isBatchTranscribing ? ' transcribing' : ''}`}
                   onClick={() => {

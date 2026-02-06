@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
 import { Search, Download, FolderOpen, RefreshCw, Check, Calendar, FileJson, FileText, Table, Loader2, X, ChevronDown, ChevronLeft, ChevronRight, FileSpreadsheet, Database, FileCode, CheckCircle, XCircle, ExternalLink } from 'lucide-react'
 import * as configService from '../services/config'
 import './ExportPage.scss'
@@ -38,6 +39,7 @@ interface ExportResult {
 type SessionLayout = 'shared' | 'per-session'
 
 function ExportPage() {
+  const location = useLocation()
   const defaultTxtColumns = ['index', 'time', 'senderRole', 'messageType', 'content']
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [filteredSessions, setFilteredSessions] = useState<ChatSession[]>([])
@@ -63,6 +65,19 @@ function ExportPage() {
   const exportStartTime = useRef<number>(0)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const displayNameDropdownRef = useRef<HTMLDivElement>(null)
+  const preselectAppliedRef = useRef(false)
+
+  const preselectSessionIds = useMemo(() => {
+    const state = location.state as { preselectSessionIds?: unknown; preselectSessionId?: unknown } | null
+    const rawList = Array.isArray(state?.preselectSessionIds)
+      ? state?.preselectSessionIds
+      : (typeof state?.preselectSessionId === 'string' ? [state.preselectSessionId] : [])
+
+    return rawList
+      .filter((item): item is string => typeof item === 'string')
+      .map(item => item.trim())
+      .filter(Boolean)
+  }, [location.state])
 
   const [options, setOptions] = useState<ExportOptions>({
     format: 'excel',
@@ -183,6 +198,24 @@ function ExportPage() {
     loadExportPath()
     loadExportDefaults()
   }, [loadSessions, loadExportPath, loadExportDefaults])
+
+  useEffect(() => {
+    preselectAppliedRef.current = false
+  }, [location.key, preselectSessionIds])
+
+  useEffect(() => {
+    if (preselectAppliedRef.current) return
+    if (sessions.length === 0 || preselectSessionIds.length === 0) return
+
+    const exists = new Set(sessions.map(session => session.username))
+    const matched = preselectSessionIds.filter(id => exists.has(id))
+    preselectAppliedRef.current = true
+
+    if (matched.length > 0) {
+      setSelectedSessions(new Set(matched))
+      setSearchKeyword('')
+    }
+  }, [sessions, preselectSessionIds])
 
   useEffect(() => {
     const handleChange = () => {
