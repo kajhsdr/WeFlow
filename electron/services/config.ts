@@ -8,12 +8,13 @@ interface ConfigSchema {
   onboardingDone: boolean
   imageXorKey: number
   imageAesKey: string
-  
+  wxidConfigs: Record<string, { decryptKey?: string; imageXorKey?: number; imageAesKey?: string; updatedAt?: number }>
+
   // 缓存相关
   cachePath: string
   lastOpenedDb: string
   lastSession: string
-  
+
   // 界面相关
   theme: 'light' | 'dark' | 'system'
   themeId: string
@@ -25,12 +26,40 @@ interface ConfigSchema {
   whisperDownloadSource: string
   autoTranscribeVoice: boolean
   transcribeLanguages: string[]
+  exportDefaultConcurrency: number
+  analyticsExcludedUsernames: string[]
+
+  // 安全相关
+  authEnabled: boolean
+  authPassword: string // SHA-256 hash
+  authUseHello: boolean
+
+  // 更新相关
+  ignoredUpdateVersion: string
+
+  // 通知
+  notificationEnabled: boolean
+  notificationPosition: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left'
+  notificationFilterMode: 'all' | 'whitelist' | 'blacklist'
+  notificationFilterList: string[]
 }
 
 export class ConfigService {
-  private store: Store<ConfigSchema>
+  private static instance: ConfigService
+  private store!: Store<ConfigSchema>
+
+  static getInstance(): ConfigService {
+    if (!ConfigService.instance) {
+      ConfigService.instance = new ConfigService()
+    }
+    return ConfigService.instance
+  }
 
   constructor() {
+    if (ConfigService.instance) {
+      return ConfigService.instance
+    }
+    ConfigService.instance = this
     this.store = new Store<ConfigSchema>({
       name: 'WeFlow-config',
       defaults: {
@@ -40,6 +69,7 @@ export class ConfigService {
         onboardingDone: false,
         imageXorKey: 0,
         imageAesKey: '',
+        wxidConfigs: {},
         cachePath: '',
         lastOpenedDb: '',
         lastSession: '',
@@ -52,7 +82,19 @@ export class ConfigService {
         whisperModelDir: '',
         whisperDownloadSource: 'tsinghua',
         autoTranscribeVoice: false,
-        transcribeLanguages: ['zh']
+        transcribeLanguages: ['zh'],
+        exportDefaultConcurrency: 2,
+        analyticsExcludedUsernames: [],
+
+        authEnabled: false,
+        authPassword: '',
+        authUseHello: false,
+
+        ignoredUpdateVersion: '',
+        notificationEnabled: true,
+        notificationPosition: 'top-right',
+        notificationFilterMode: 'all',
+        notificationFilterList: []
       }
     })
   }

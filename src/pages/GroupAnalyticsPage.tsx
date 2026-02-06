@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
-import { Users, BarChart3, Clock, Image, Loader2, RefreshCw, User, Medal, Search, X, ChevronLeft, Copy, Check } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
+import { Users, BarChart3, Clock, Image, Loader2, RefreshCw, User, Medal, Search, X, ChevronLeft, Copy, Check, Download } from 'lucide-react'
 import { Avatar } from '../components/Avatar'
 import ReactECharts from 'echarts-for-react'
 import DateRangePicker from '../components/DateRangePicker'
@@ -16,6 +17,10 @@ interface GroupMember {
   username: string
   displayName: string
   avatarUrl?: string
+  nickname?: string
+  alias?: string
+  remark?: string
+  groupNickname?: string
 }
 
 interface GroupMessageRank {
@@ -26,6 +31,7 @@ interface GroupMessageRank {
 type AnalysisFunction = 'members' | 'ranking' | 'activeHours' | 'mediaStats'
 
 function GroupAnalyticsPage() {
+  const location = useLocation()
   const [groups, setGroups] = useState<GroupChatInfo[]>([])
   const [filteredGroups, setFilteredGroups] = useState<GroupChatInfo[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -39,6 +45,7 @@ function GroupAnalyticsPage() {
   const [activeHours, setActiveHours] = useState<Record<number, number>>({})
   const [mediaStats, setMediaStats] = useState<{ typeCounts: Array<{ type: number; name: string; count: number }>; total: number } | null>(null)
   const [functionLoading, setFunctionLoading] = useState(false)
+  const [isExportingMembers, setIsExportingMembers] = useState(false)
 
   // 成员详情弹框
   const [selectedMember, setSelectedMember] = useState<GroupMember | null>(null)
@@ -53,10 +60,27 @@ function GroupAnalyticsPage() {
   const [sidebarWidth, setSidebarWidth] = useState(300)
   const [isResizing, setIsResizing] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+  const preselectAppliedRef = useRef(false)
+
+  const preselectGroupIds = useMemo(() => {
+    const state = location.state as { preselectGroupIds?: unknown; preselectGroupId?: unknown } | null
+    const rawList = Array.isArray(state?.preselectGroupIds)
+      ? state.preselectGroupIds
+      : (typeof state?.preselectGroupId === 'string' ? [state.preselectGroupId] : [])
+
+    return rawList
+      .filter((item): item is string => typeof item === 'string')
+      .map(item => item.trim())
+      .filter(Boolean)
+  }, [location.state])
 
   useEffect(() => {
     loadGroups()
   }, [])
+
+  useEffect(() => {
+    preselectAppliedRef.current = false
+  }, [location.key, preselectGroupIds])
 
   useEffect(() => {
     if (searchQuery) {
@@ -65,6 +89,20 @@ function GroupAnalyticsPage() {
       setFilteredGroups(groups)
     }
   }, [searchQuery, groups])
+
+  useEffect(() => {
+    if (preselectAppliedRef.current) return
+    if (groups.length === 0 || preselectGroupIds.length === 0) return
+
+    const matchedGroup = groups.find(group => preselectGroupIds.includes(group.username))
+    preselectAppliedRef.current = true
+
+    if (matchedGroup) {
+      setSelectedGroup(matchedGroup)
+      setSelectedFunction(null)
+      setSearchQuery('')
+    }
+  }, [groups, preselectGroupIds])
 
   // 拖动调整宽度
   useEffect(() => {
@@ -93,7 +131,7 @@ function GroupAnalyticsPage() {
     }
   }, [dateRangeReady])
 
-  const loadGroups = async () => {
+  const loadGroups = useCallback(async () => {
     setIsLoading(true)
     try {
       const result = await window.electronAPI.groupAnalytics.getGroupChats()
@@ -106,7 +144,23 @@ function GroupAnalyticsPage() {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    const handleChange = () => {
+      setGroups([])
+      setFilteredGroups([])
+      setSelectedGroup(null)
+      setSelectedFunction(null)
+      setMembers([])
+      setRankings([])
+      setActiveHours({})
+      setMediaStats(null)
+      void loadGroups()
+    }
+    window.addEventListener('wxid-changed', handleChange as EventListener)
+    return () => window.removeEventListener('wxid-changed', handleChange as EventListener)
+  }, [loadGroups])
 
   const handleGroupSelect = (group: GroupChatInfo) => {
     if (selectedGroup?.username !== group.username) {
@@ -163,6 +217,10 @@ function GroupAnalyticsPage() {
   const formatNumber = (num: number) => {
     if (num >= 10000) return (num / 10000).toFixed(1) + '万'
     return num.toLocaleString()
+  }
+
+  const sanitizeFileName = (name: string) => {
+    return name.replace(/[<>:"/\\|?*]+/g, '_').trim()
   }
 
   const getHourlyOption = () => {
@@ -236,6 +294,35 @@ function GroupAnalyticsPage() {
     setCopiedField(null)
   }
 
+  const handleExportMembers = async () => {
+    if (!selectedGroup || isExportingMembers) return
+    setIsExportingMembers(true)
+    try {
+      const downloadsPath = await window.electronAPI.app.getDownloadsPath()
+      const baseName = sanitizeFileName(`${selectedGroup.displayName || selectedGroup.username}_群成员列表`)
+      const separator = downloadsPath && downloadsPath.includes('\\') ? '\\' : '/'
+      const defaultPath = downloadsPath ? `${downloadsPath}${separator}${baseName}.xlsx` : `${baseName}.xlsx`
+      const saveResult = await window.electronAPI.dialog.saveFile({
+        title: '导出群成员列表',
+        defaultPath,
+        filters: [{ name: 'Excel', extensions: ['xlsx'] }]
+      })
+      if (!saveResult || saveResult.canceled || !saveResult.filePath) return
+
+      const result = await window.electronAPI.groupAnalytics.exportGroupMembers(selectedGroup.username, saveResult.filePath)
+      if (result.success) {
+        alert(`导出成功，共 ${result.count ?? members.length} 人`)
+      } else {
+        alert(`导出失败：${result.error || '未知错误'}`)
+      }
+    } catch (e) {
+      console.error('导出群成员失败:', e)
+      alert(`导出失败：${String(e)}`)
+    } finally {
+      setIsExportingMembers(false)
+    }
+  }
+
   const handleCopy = async (text: string, field: string) => {
     try {
       await navigator.clipboard.writeText(text)
@@ -248,6 +335,10 @@ function GroupAnalyticsPage() {
 
   const renderMemberModal = () => {
     if (!selectedMember) return null
+    const nickname = (selectedMember.nickname || '').trim()
+    const alias = (selectedMember.alias || '').trim()
+    const remark = (selectedMember.remark || '').trim()
+    const groupNickname = (selectedMember.groupNickname || '').trim()
 
     return (
       <div className="member-modal-overlay" onClick={() => setSelectedMember(null)}>
@@ -270,11 +361,40 @@ function GroupAnalyticsPage() {
               </div>
               <div className="detail-row">
                 <span className="detail-label">昵称</span>
-                <span className="detail-value">{selectedMember.displayName}</span>
-                <button className="copy-btn" onClick={() => handleCopy(selectedMember.displayName, 'displayName')}>
-                  {copiedField === 'displayName' ? <Check size={14} /> : <Copy size={14} />}
-                </button>
+                <span className="detail-value">{nickname || '未设置'}</span>
+                {nickname && (
+                  <button className="copy-btn" onClick={() => handleCopy(nickname, 'nickname')}>
+                    {copiedField === 'nickname' ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                )}
               </div>
+              {alias && (
+                <div className="detail-row">
+                  <span className="detail-label">微信号</span>
+                  <span className="detail-value">{alias}</span>
+                  <button className="copy-btn" onClick={() => handleCopy(alias, 'alias')}>
+                    {copiedField === 'alias' ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                </div>
+              )}
+              {groupNickname && (
+                <div className="detail-row">
+                  <span className="detail-label">群昵称</span>
+                  <span className="detail-value">{groupNickname}</span>
+                  <button className="copy-btn" onClick={() => handleCopy(groupNickname, 'groupNickname')}>
+                    {copiedField === 'groupNickname' ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                </div>
+              )}
+              {remark && (
+                <div className="detail-row">
+                  <span className="detail-label">备注</span>
+                  <span className="detail-value">{remark}</span>
+                  <button className="copy-btn" onClick={() => handleCopy(remark, 'remark')}>
+                    {copiedField === 'remark' ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -406,6 +526,12 @@ function GroupAnalyticsPage() {
               onEndDateChange={setEndDate}
               onRangeComplete={handleDateRangeComplete}
             />
+          )}
+          {selectedFunction === 'members' && (
+            <button className="export-btn" onClick={handleExportMembers} disabled={functionLoading || isExportingMembers}>
+              {isExportingMembers ? <Loader2 size={16} className="spin" /> : <Download size={16} />}
+              <span>导出成员</span>
+            </button>
           )}
           <button className="refresh-btn" onClick={handleRefresh} disabled={functionLoading}>
             <RefreshCw size={16} className={functionLoading ? 'spin' : ''} />
