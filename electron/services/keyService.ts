@@ -33,6 +33,7 @@ export class KeyService {
   private ReadProcessMemory: any = null
   private MEMORY_BASIC_INFORMATION: any = null
   private TerminateProcess: any = null
+  private QueryFullProcessImageNameW: any = null
 
   // User32
   private EnumWindows: any = null
@@ -42,6 +43,7 @@ export class KeyService {
   private GetWindowThreadProcessId: any = null
   private IsWindowVisible: any = null
   private EnumChildWindows: any = null
+  private PostMessageW: any = null
   private WNDENUMPROC_PTR: any = null
 
   // Advapi32
@@ -56,6 +58,7 @@ export class KeyService {
   private readonly HKEY_LOCAL_MACHINE = 0x80000002
   private readonly HKEY_CURRENT_USER = 0x80000001
   private readonly ERROR_SUCCESS = 0
+  private readonly WM_CLOSE = 0x0010
 
   private getDllPath(): string {
     const isPackaged = typeof app !== 'undefined' && app ? app.isPackaged : process.env.NODE_ENV === 'production'
@@ -113,13 +116,13 @@ export class KeyService {
 
       // 检查是否已经有本地副本，如果有就使用它
       if (existsSync(localPath)) {
-        console.log(`使用已存在的 DLL 本地副本: ${localPath}`)
+        
         return localPath
       }
 
-      console.log(`检测到网络路径 DLL，正在复制到本地: ${originalPath} -> ${localPath}`)
+      
       copyFileSync(originalPath, localPath)
-      console.log('DLL 本地化成功')
+      
       return localPath
     } catch (e) {
       console.error('DLL 本地化失败:', e)
@@ -143,7 +146,7 @@ export class KeyService {
 
       // 检查是否为网络路径，如果是则本地化
       if (this.isNetworkPath(dllPath)) {
-        console.log('检测到网络路径，将进行本地化处理')
+        
         dllPath = this.localizeNetworkDll(dllPath)
       }
 
@@ -194,6 +197,7 @@ export class KeyService {
       this.OpenProcess = this.kernel32.func('OpenProcess', 'HANDLE', ['uint32', 'bool', 'uint32'])
       this.CloseHandle = this.kernel32.func('CloseHandle', 'bool', ['HANDLE'])
       this.TerminateProcess = this.kernel32.func('TerminateProcess', 'bool', ['HANDLE', 'uint32'])
+      this.QueryFullProcessImageNameW = this.kernel32.func('QueryFullProcessImageNameW', 'bool', ['HANDLE', 'uint32', this.koffi.out('uint16*'), this.koffi.out('uint32*')])
       this.VirtualQueryEx = this.kernel32.func('VirtualQueryEx', 'uint64', ['HANDLE', 'uint64', this.koffi.out(this.koffi.pointer(this.MEMORY_BASIC_INFORMATION)), 'uint64'])
       this.ReadProcessMemory = this.kernel32.func('ReadProcessMemory', 'bool', ['HANDLE', 'uint64', 'void*', 'uint64', this.koffi.out(this.koffi.pointer('uint64'))])
 
@@ -222,6 +226,7 @@ export class KeyService {
 
       this.EnumWindows = this.user32.func('EnumWindows', 'bool', [this.WNDENUMPROC_PTR, 'intptr_t'])
       this.EnumChildWindows = this.user32.func('EnumChildWindows', 'bool', ['void*', this.WNDENUMPROC_PTR, 'intptr_t'])
+      this.PostMessageW = this.user32.func('PostMessageW', 'bool', ['void*', 'uint32', 'uintptr_t', 'intptr_t'])
 
       this.GetWindowTextW = this.user32.func('GetWindowTextW', 'int', ['void*', this.koffi.out('uint16*'), 'int'])
       this.GetWindowTextLengthW = this.user32.func('GetWindowTextLengthW', 'int', ['void*'])
@@ -310,7 +315,46 @@ export class KeyService {
     }
   }
 
+  private async getProcessExecutablePath(pid: number): Promise<string | null> {
+    if (!this.ensureKernel32()) return null
+    // 0x1000 = PROCESS_QUERY_LIMITED_INFORMATION
+    const hProcess = this.OpenProcess(0x1000, false, pid)
+    if (!hProcess) return null
+
+    try {
+      const sizeBuf = Buffer.alloc(4)
+      sizeBuf.writeUInt32LE(1024, 0)
+      const pathBuf = Buffer.alloc(1024 * 2)
+
+      const ret = this.QueryFullProcessImageNameW(hProcess, 0, pathBuf, sizeBuf)
+      if (ret) {
+        const len = sizeBuf.readUInt32LE(0)
+        return pathBuf.toString('ucs2', 0, len * 2)
+      }
+      return null
+    } catch (e) {
+      console.error('获取进程路径失败:', e)
+      return null
+    } finally {
+      this.CloseHandle(hProcess)
+    }
+  }
+
   private async findWeChatInstallPath(): Promise<string | null> {
+    // 0. 优先尝试获取正在运行的微信进程路径
+    try {
+      const pid = await this.findWeChatPid()
+      if (pid) {
+        const runPath = await this.getProcessExecutablePath(pid)
+        if (runPath && existsSync(runPath)) {
+          
+          return runPath
+        }
+      }
+    } catch (e) {
+      console.error('尝试获取运行中微信路径失败:', e)
+    }
+
     // 1. Registry - Uninstall Keys
     const uninstallKeys = [
       'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
@@ -396,15 +440,59 @@ export class KeyService {
     return fallbackPid ?? null
   }
 
-  private async killWeChatProcesses() {
+  private async waitForWeChatExit(timeoutMs = 8000): Promise<boolean> {
+    const start = Date.now()
+    while (Date.now() - start < timeoutMs) {
+      const weixinPid = await this.findPidByImageName('Weixin.exe')
+      const wechatPid = await this.findPidByImageName('WeChat.exe')
+      if (!weixinPid && !wechatPid) return true
+      await new Promise(r => setTimeout(r, 400))
+    }
+    return false
+  }
+
+  private async closeWeChatWindows(): Promise<boolean> {
+    if (!this.ensureUser32()) return false
+    let requested = false
+
+    const enumWindowsCallback = this.koffi.register((hWnd: any, lParam: any) => {
+      if (!this.IsWindowVisible(hWnd)) return true
+      const title = this.getWindowTitle(hWnd)
+      const className = this.getClassName(hWnd)
+      const classLower = (className || '').toLowerCase()
+      const isWeChatWindow = this.isWeChatWindowTitle(title) || classLower.includes('wechat') || classLower.includes('weixin')
+      if (!isWeChatWindow) return true
+
+      requested = true
+      try {
+        this.PostMessageW?.(hWnd, this.WM_CLOSE, 0, 0)
+      } catch { }
+      return true
+    }, this.WNDENUMPROC_PTR)
+
+    this.EnumWindows(enumWindowsCallback, 0)
+    this.koffi.unregister(enumWindowsCallback)
+
+    return requested
+  }
+
+  private async killWeChatProcesses(): Promise<boolean> {
+    const requested = await this.closeWeChatWindows()
+    if (requested) {
+      const gracefulOk = await this.waitForWeChatExit(1500)
+      if (gracefulOk) return true
+    }
+
     try {
-      await execFileAsync('taskkill', ['/F', '/IM', 'Weixin.exe'])
-      await execFileAsync('taskkill', ['/F', '/IM', 'WeChat.exe'])
+      await execFileAsync('taskkill', ['/F', '/T', '/IM', 'Weixin.exe'])
+      await execFileAsync('taskkill', ['/F', '/T', '/IM', 'WeChat.exe'])
     } catch (e) {
       // Ignore if not found
     }
-    await new Promise(r => setTimeout(r, 1000))
+
+    return await this.waitForWeChatExit(5000)
   }
+
 
   // --- Window Detection ---
 
@@ -564,15 +652,24 @@ export class KeyService {
     }
 
     // 2. Restart WeChat
-    onStatus?.('正在重启微信以进行获取...', 0)
-    await this.killWeChatProcesses()
+    onStatus?.('正在关闭微信以进行获取...', 0)
+    const closed = await this.killWeChatProcesses()
+    if (!closed) {
+      const err = '无法自动关闭微信，请手动退出后重试'
+      onStatus?.(err, 2)
+      return { success: false, error: err }
+    }
 
-    // 3. Launch
+// 3. Launch
     onStatus?.('正在启动微信...', 0)
-    const sub = spawn(wechatPath, { detached: true, stdio: 'ignore' })
+    const sub = spawn(wechatPath, {
+      detached: true,
+      stdio: 'ignore',
+      cwd: dirname(wechatPath)
+    })
     sub.unref()
 
-    // 4. Wait for Window & Get PID (Crucial change: discover PID from window)
+// 4. Wait for Window & Get PID (Crucial change: discover PID from window)
     onStatus?.('等待微信界面就绪...', 0)
     const pid = await this.waitForWeChatWindow()
     if (!pid) {
@@ -588,6 +685,11 @@ export class KeyService {
     if (!ok) {
       const error = this.getLastErrorMsg ? this.decodeCString(this.getLastErrorMsg()) : ''
       if (error) {
+        // 检测权限不足错误 (NTSTATUS 0xC0000022 = STATUS_ACCESS_DENIED)
+        if (error.includes('0xC0000022') || error.includes('ACCESS_DENIED') || error.includes('打开目标进程失败')) {
+          const friendlyError = '权限不足：无法访问微信进程。\n\n解决方法：\n1. 右键 WeFlow 图标，选择"以管理员身份运行"\n2. 关闭可能拦截的安全软件（如360、火绒等）\n3. 确保微信没有以管理员权限运行'
+          return { success: false, error: friendlyError }
+        }
         return { success: false, error }
       }
       const statusBuffer = Buffer.alloc(256)
@@ -836,16 +938,17 @@ export class KeyService {
     return null
   }
 
-  private isAlphaNumAscii(byte: number): boolean {
-    return (byte >= 0x61 && byte <= 0x7a) || (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x30 && byte <= 0x39)
+  private isAlphaNumLower(byte: number): boolean {
+    // 只匹配小写字母 a-z 和数字 0-9（AES密钥格式）
+    return (byte >= 0x61 && byte <= 0x7a) || (byte >= 0x30 && byte <= 0x39)
   }
 
-  private isUtf16AsciiKey(buf: Buffer, start: number): boolean {
+  private isUtf16LowerKey(buf: Buffer, start: number): boolean {
     if (start + 64 > buf.length) return false
     for (let j = 0; j < 32; j++) {
       const charByte = buf[start + j * 2]
       const nullByte = buf[start + j * 2 + 1]
-      if (nullByte !== 0x00 || !this.isAlphaNumAscii(charByte)) {
+      if (nullByte !== 0x00 || !this.isAlphaNumLower(charByte)) {
         return false
       }
     }
@@ -878,8 +981,6 @@ export class KeyService {
     const regions: Array<[number, number]> = []
     const MEM_COMMIT = 0x1000
     const MEM_PRIVATE = 0x20000
-    const MEM_MAPPED = 0x40000
-    const MEM_IMAGE = 0x1000000
     const PAGE_NOACCESS = 0x01
     const PAGE_GUARD = 0x100
 
@@ -894,10 +995,9 @@ export class KeyService {
       const protect = info.Protect
       const type = info.Type
       const regionSize = Number(info.RegionSize)
-      if (state === MEM_COMMIT && (protect & PAGE_NOACCESS) === 0 && (protect & PAGE_GUARD) === 0) {
-        if (type === MEM_PRIVATE || type === MEM_MAPPED || type === MEM_IMAGE) {
-          regions.push([Number(info.BaseAddress), regionSize])
-        }
+      // 只收集已提交的私有内存（大幅减少扫描区域）
+      if (state === MEM_COMMIT && type === MEM_PRIVATE && (protect & PAGE_NOACCESS) === 0 && (protect & PAGE_GUARD) === 0) {
+        regions.push([Number(info.BaseAddress), regionSize])
       }
 
       const nextAddress = address + regionSize
@@ -926,86 +1026,51 @@ export class KeyService {
 
     try {
       const allRegions = this.getMemoryRegions(hProcess)
+      const totalRegions = allRegions.length
+      let scannedCount = 0
+      let skippedCount = 0
 
-      // 优化1: 只保留小内存区域（< 10MB）- 密钥通常在小区域，可大幅减少扫描时间
-      const filteredRegions = allRegions.filter(([_, size]) => size <= 10 * 1024 * 1024)
+      for (const [baseAddress, regionSize] of allRegions) {
+        // 跳过太大的内存区域（> 100MB）
+        if (regionSize > 100 * 1024 * 1024) {
+          skippedCount++
+          continue
+        }
 
-      // 优化2: 优先级排序 - 按大小升序，先扫描小区域（密钥通常在较小区域）
-      const sortedRegions = filteredRegions.sort((a, b) => a[1] - b[1])
+        scannedCount++
+        if (scannedCount % 10 === 0) {
+          onProgress?.(scannedCount, totalRegions, `正在扫描微信内存... (${scannedCount}/${totalRegions})`)
+          await new Promise(resolve => setImmediate(resolve))
+        }
 
-      // 优化3: 计算总字节数用于精确进度报告
-      const totalBytes = sortedRegions.reduce((sum, [_, size]) => sum + size, 0)
-      let processedBytes = 0
+        const memory = this.readProcessMemory(hProcess, baseAddress, regionSize)
+        if (!memory) continue
 
-      // 优化4: 减小分块大小到 1MB（参考 wx_key 项目）
-      const chunkSize = 1 * 1024 * 1024
-      const overlap = 65
-      let currentRegion = 0
+        // 直接在原始字节中搜索32字节的小写字母数字序列
+        for (let i = 0; i < memory.length - 34; i++) {
+          // 检查前导字符（不是小写字母或数字）
+          if (this.isAlphaNumLower(memory[i])) continue
 
-      for (const [baseAddress, regionSize] of sortedRegions) {
-        currentRegion++
-        const progress = totalBytes > 0 ? Math.floor((processedBytes / totalBytes) * 100) : 0
-        onProgress?.(progress, 100, `扫描内存 ${progress}% (${currentRegion}/${sortedRegions.length})`)
+          // 检查接下来32个字节是否都是小写字母或数字
+          let valid = true
+          for (let j = 1; j <= 32; j++) {
+            if (!this.isAlphaNumLower(memory[i + j])) {
+              valid = false
+              break
+            }
+          }
+          if (!valid) continue
 
-        // 每个区域都让出主线程，确保UI流畅
-        await new Promise(resolve => setImmediate(resolve))
-        let offset = 0
-        let trailing: Buffer | null = null
-        while (offset < regionSize) {
-          const remaining = regionSize - offset
-          const currentChunkSize = remaining > chunkSize ? chunkSize : remaining
-          const chunk = this.readProcessMemory(hProcess, baseAddress + offset, currentChunkSize)
-          if (!chunk || !chunk.length) {
-            offset += currentChunkSize
-            trailing = null
+          // 检查尾部字符（不是小写字母或数字）
+          if (i + 33 < memory.length && this.isAlphaNumLower(memory[i + 33])) {
             continue
           }
 
-          let dataToScan: Buffer
-          if (trailing && trailing.length) {
-            dataToScan = Buffer.concat([trailing, chunk])
-          } else {
-            dataToScan = chunk
+          const keyBytes = memory.subarray(i + 1, i + 33)
+          if (this.verifyKey(ciphertext, keyBytes)) {
+            return keyBytes.toString('ascii')
           }
-
-          for (let i = 0; i < dataToScan.length - 34; i++) {
-            if (this.isAlphaNumAscii(dataToScan[i])) continue
-            let valid = true
-            for (let j = 1; j <= 32; j++) {
-              if (!this.isAlphaNumAscii(dataToScan[i + j])) {
-                valid = false
-                break
-              }
-            }
-            if (valid && this.isAlphaNumAscii(dataToScan[i + 33])) {
-              valid = false
-            }
-            if (valid) {
-              const keyBytes = dataToScan.subarray(i + 1, i + 33)
-              if (this.verifyKey(ciphertext, keyBytes)) {
-                return keyBytes.toString('ascii')
-              }
-            }
-          }
-
-          for (let i = 0; i < dataToScan.length - 65; i++) {
-            if (!this.isUtf16AsciiKey(dataToScan, i)) continue
-            const keyBytes = Buffer.alloc(32)
-            for (let j = 0; j < 32; j++) {
-              keyBytes[j] = dataToScan[i + j * 2]
-            }
-            if (this.verifyKey(ciphertext, keyBytes)) {
-              return keyBytes.toString('ascii')
-            }
-          }
-
-          const start = dataToScan.length - overlap
-          trailing = dataToScan.subarray(start < 0 ? 0 : start)
-          offset += currentChunkSize
         }
-
-        // 更新已处理字节数
-        processedBytes += regionSize
       }
       return null
     } finally {

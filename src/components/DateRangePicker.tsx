@@ -86,7 +86,7 @@ function DateRangePicker({ startDate, endDate, onStartDateChange, onEndDateChang
 
   const handleDateClick = (day: number) => {
     const dateStr = `${currentMonth.getFullYear()}-${String(currentMonth.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-    
+
     if (selectingStart) {
       onStartDateChange(dateStr)
       if (endDate && dateStr > endDate) {
@@ -125,8 +125,8 @@ function DateRangePicker({ startDate, endDate, onStartDateChange, onEndDateChang
   const isToday = (day: number) => {
     const today = new Date()
     return currentMonth.getFullYear() === today.getFullYear() &&
-           currentMonth.getMonth() === today.getMonth() &&
-           day === today.getDate()
+      currentMonth.getMonth() === today.getMonth() &&
+      day === today.getDate()
   }
 
   const renderCalendar = () => {

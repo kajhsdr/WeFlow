@@ -70,6 +70,7 @@
       opacity: 0;
       transform: translateY(-8px);
     }
+
     to {
       opacity: 1;
       transform: translateY(0);
@@ -144,6 +145,7 @@
   .calendar-grid {
     display: grid;
     grid-template-columns: repeat(7, 1fr);
+    grid-template-rows: auto repeat(6, 32px);
     gap: 2px;
   }
 
@@ -156,7 +158,6 @@
   }
 
   .calendar-day {
-    aspect-ratio: 1;
     display: flex;
     align-items: center;
     justify-content: center;

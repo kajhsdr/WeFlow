@@ -6,8 +6,7 @@ interface RouteGuardProps {
   children: React.ReactNode
 }
 
-// 不需要数据库连接的页面
-const PUBLIC_ROUTES = ['/', '/home', '/settings', '/data-management']
+const PUBLIC_ROUTES = ['/', '/home', '/settings']
 
 function RouteGuard({ children }: RouteGuardProps) {
   const navigate = useNavigate()

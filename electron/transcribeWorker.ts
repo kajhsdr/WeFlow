@@ -80,17 +80,17 @@ function isLanguageAllowed(result: any, allowedLanguages: string[]): boolean {
     }
 
     const langTag = result.lang
-    console.log('[TranscribeWorker] 检测到语言标记:', langTag)
+    
 
     // 检查是否在允许的语言列表中
     for (const lang of allowedLanguages) {
         if (LANGUAGE_TAGS[lang] === langTag) {
-            console.log('[TranscribeWorker] 语言匹配，允许:', lang)
+            
             return true
         }
     }
 
-    console.log('[TranscribeWorker] 语言不在白名单中，过滤掉')
+    
     return false
 }
 
@@ -117,7 +117,7 @@ async function run() {
             allowedLanguages = ['zh']
         }
 
-        console.log('[TranscribeWorker] 使用的语言白名单:', allowedLanguages)
+        
 
         // 1. 初始化识别器 (SenseVoiceSmall)
         const recognizerConfig = {
@@ -145,15 +145,15 @@ async function run() {
         recognizer.decode(stream)
         const result = recognizer.getResult(stream)
 
-        console.log('[TranscribeWorker] 识别完成 - 结果对象:', JSON.stringify(result, null, 2))
+        
 
         // 3. 检查语言是否在白名单中
         if (isLanguageAllowed(result, allowedLanguages)) {
             const processedText = richTranscribePostProcess(result.text)
-            console.log('[TranscribeWorker] 语言匹配，返回文本:', processedText)
+            
             parentPort.postMessage({ type: 'final', text: processedText })
         } else {
-            console.log('[TranscribeWorker] 语言不匹配，返回空文本')
+            
             parentPort.postMessage({ type: 'final', text: '' })
         }
 
