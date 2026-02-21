@@ -6,11 +6,13 @@ export const CONFIG_KEYS = {
   DECRYPT_KEY: 'decryptKey',
   DB_PATH: 'dbPath',
   MY_WXID: 'myWxid',
+  WXID_CONFIGS: 'wxidConfigs',
   THEME: 'theme',
   THEME_ID: 'themeId',
   LAST_SESSION: 'lastSession',
   WINDOW_BOUNDS: 'windowBounds',
   CACHE_PATH: 'cachePath',
+
   EXPORT_PATH: 'exportPath',
   AGREEMENT_ACCEPTED: 'agreementAccepted',
   LOG_ENABLED: 'logEnabled',
@@ -27,8 +29,34 @@ export const CONFIG_KEYS = {
   EXPORT_DEFAULT_DATE_RANGE: 'exportDefaultDateRange',
   EXPORT_DEFAULT_MEDIA: 'exportDefaultMedia',
   EXPORT_DEFAULT_VOICE_AS_TEXT: 'exportDefaultVoiceAsText',
-  EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS: 'exportDefaultExcelCompactColumns'
+  EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS: 'exportDefaultExcelCompactColumns',
+  EXPORT_DEFAULT_TXT_COLUMNS: 'exportDefaultTxtColumns',
+  EXPORT_DEFAULT_CONCURRENCY: 'exportDefaultConcurrency',
+
+  // 安全
+  AUTH_ENABLED: 'authEnabled',
+  AUTH_PASSWORD: 'authPassword',
+  AUTH_USE_HELLO: 'authUseHello',
+
+  // 更新
+  IGNORED_UPDATE_VERSION: 'ignoredUpdateVersion',
+
+  // 通知
+  NOTIFICATION_ENABLED: 'notificationEnabled',
+  NOTIFICATION_POSITION: 'notificationPosition',
+  NOTIFICATION_FILTER_MODE: 'notificationFilterMode',
+  NOTIFICATION_FILTER_LIST: 'notificationFilterList',
+
+  // 词云
+  WORD_CLOUD_EXCLUDE_WORDS: 'wordCloudExcludeWords'
 } as const
+
+export interface WxidConfig {
+  decryptKey?: string
+  imageXorKey?: number
+  imageAesKey?: string
+  updatedAt?: number
+}
 
 // 获取解密密钥
 export async function getDecryptKey(): Promise<string | null> {
@@ -61,6 +89,32 @@ export async function getMyWxid(): Promise<string | null> {
 // 设置当前用户 wxid
 export async function setMyWxid(wxid: string): Promise<void> {
   await config.set(CONFIG_KEYS.MY_WXID, wxid)
+}
+
+export async function getWxidConfigs(): Promise<Record<string, WxidConfig>> {
+  const value = await config.get(CONFIG_KEYS.WXID_CONFIGS)
+  if (value && typeof value === 'object') {
+    return value as Record<string, WxidConfig>
+  }
+  return {}
+}
+
+export async function getWxidConfig(wxid: string): Promise<WxidConfig | null> {
+  if (!wxid) return null
+  const configs = await getWxidConfigs()
+  return configs[wxid] || null
+}
+
+export async function setWxidConfig(wxid: string, configValue: WxidConfig): Promise<void> {
+  if (!wxid) return
+  const configs = await getWxidConfigs()
+  const previous = configs[wxid] || {}
+  configs[wxid] = {
+    ...previous,
+    ...configValue,
+    updatedAt: Date.now()
+  }
+  await config.set(CONFIG_KEYS.WXID_CONFIGS, configs)
 }
 
 // 获取主题
@@ -107,6 +161,8 @@ export async function getCachePath(): Promise<string | null> {
 export async function setCachePath(path: string): Promise<void> {
   await config.set(CONFIG_KEYS.CACHE_PATH, path)
 }
+
+
 
 
 // 获取导出路径
@@ -305,4 +361,124 @@ export async function getExportDefaultExcelCompactColumns(): Promise<boolean | n
 // 设置导出默认 Excel 列模式
 export async function setExportDefaultExcelCompactColumns(enabled: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS, enabled)
+}
+
+// 获取导出默认 TXT 列配置
+export async function getExportDefaultTxtColumns(): Promise<string[] | null> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_DEFAULT_TXT_COLUMNS)
+  return Array.isArray(value) ? (value as string[]) : null
+}
+
+// 设置导出默认 TXT 列配置
+export async function setExportDefaultTxtColumns(columns: string[]): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_DEFAULT_TXT_COLUMNS, columns)
+}
+
+// 获取导出默认并发数
+export async function getExportDefaultConcurrency(): Promise<number | null> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_DEFAULT_CONCURRENCY)
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  return null
+}
+
+// 设置导出默认并发数
+export async function setExportDefaultConcurrency(concurrency: number): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_DEFAULT_CONCURRENCY, concurrency)
+}
+
+// === 安全相关 ===
+
+export async function getAuthEnabled(): Promise<boolean> {
+  const value = await config.get(CONFIG_KEYS.AUTH_ENABLED)
+  return value === true
+}
+
+export async function setAuthEnabled(enabled: boolean): Promise<void> {
+  await config.set(CONFIG_KEYS.AUTH_ENABLED, enabled)
+}
+
+export async function getAuthPassword(): Promise<string> {
+  const value = await config.get(CONFIG_KEYS.AUTH_PASSWORD)
+  return (value as string) || ''
+}
+
+export async function setAuthPassword(passwordHash: string): Promise<void> {
+  await config.set(CONFIG_KEYS.AUTH_PASSWORD, passwordHash)
+}
+
+export async function getAuthUseHello(): Promise<boolean> {
+  const value = await config.get(CONFIG_KEYS.AUTH_USE_HELLO)
+  return value === true
+}
+
+export async function setAuthUseHello(useHello: boolean): Promise<void> {
+  await config.set(CONFIG_KEYS.AUTH_USE_HELLO, useHello)
+}
+
+// === 更新相关 ===
+
+// 获取被忽略的更新版本
+export async function getIgnoredUpdateVersion(): Promise<string | null> {
+  const value = await config.get(CONFIG_KEYS.IGNORED_UPDATE_VERSION)
+  return (value as string) || null
+}
+
+// 设置被忽略的更新版本
+export async function setIgnoredUpdateVersion(version: string): Promise<void> {
+  await config.set(CONFIG_KEYS.IGNORED_UPDATE_VERSION, version)
+}
+
+// 获取通知开关
+export async function getNotificationEnabled(): Promise<boolean> {
+  const value = await config.get(CONFIG_KEYS.NOTIFICATION_ENABLED)
+  return value !== false // 默认为 true
+}
+
+// 设置通知开关
+export async function setNotificationEnabled(enabled: boolean): Promise<void> {
+  await config.set(CONFIG_KEYS.NOTIFICATION_ENABLED, enabled)
+}
+
+// 获取通知位置
+export async function getNotificationPosition(): Promise<'top-right' | 'top-left' | 'bottom-right' | 'bottom-left'> {
+  const value = await config.get(CONFIG_KEYS.NOTIFICATION_POSITION)
+  return (value as any) || 'top-right'
+}
+
+// 设置通知位置
+export async function setNotificationPosition(position: string): Promise<void> {
+  await config.set(CONFIG_KEYS.NOTIFICATION_POSITION, position)
+}
+
+// 获取通知过滤模式
+export async function getNotificationFilterMode(): Promise<'all' | 'whitelist' | 'blacklist'> {
+  const value = await config.get(CONFIG_KEYS.NOTIFICATION_FILTER_MODE)
+  return (value as any) || 'all'
+}
+
+// 设置通知过滤模式
+export async function setNotificationFilterMode(mode: 'all' | 'whitelist' | 'blacklist'): Promise<void> {
+  await config.set(CONFIG_KEYS.NOTIFICATION_FILTER_MODE, mode)
+}
+
+// 获取通知过滤列表
+export async function getNotificationFilterList(): Promise<string[]> {
+  const value = await config.get(CONFIG_KEYS.NOTIFICATION_FILTER_LIST)
+  return Array.isArray(value) ? value : []
+}
+
+// 设置通知过滤列表
+export async function setNotificationFilterList(list: string[]): Promise<void> {
+  await config.set(CONFIG_KEYS.NOTIFICATION_FILTER_LIST, list)
+}
+
+// 获取词云排除词列表
+export async function getWordCloudExcludeWords(): Promise<string[]> {
+  const value = await config.get(CONFIG_KEYS.WORD_CLOUD_EXCLUDE_WORDS)
+  return Array.isArray(value) ? value : []
+}
+
+// 设置词云排除词列表
+export async function setWordCloudExcludeWords(words: string[]): Promise<void> {
+  await config.set(CONFIG_KEYS.WORD_CLOUD_EXCLUDE_WORDS, words)
 }

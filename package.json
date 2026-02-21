@@ -1,12 +1,17 @@
 {
   "name": "weflow",
-  "version": "1.2.0",
+  "version": "2.1.0",
   "description": "WeFlow",
   "main": "dist-electron/main.js",
   "author": "cc",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hicccc77/WeFlow"
+  },
+  "//": "二改不应改变此处的作者与应用信息",
   "scripts": {
-    "postinstall": "echo 'No native modules to rebuild'",
-    "rebuild": "echo 'No native modules to rebuild'",
+    "postinstall": "electron-builder install-app-deps",
+    "rebuild": "electron-rebuild",
     "dev": "vite",
     "build": "tsc && vite build && electron-builder",
     "preview": "vite preview",
@@ -27,9 +32,13 @@
     "jszip": "^3.10.1",
     "koffi": "^2.9.0",
     "lucide-react": "^0.562.0",
+    "node-llama-cpp": "^3.15.1",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "^7.1.1",
+    "react-virtuoso": "^4.18.1",
+    "remark-gfm": "^4.0.1",
     "sherpa-onnx-node": "^1.10.38",
     "silk-wasm": "^3.7.1",
     "wechat-emojis": "^1.0.2",
@@ -54,6 +63,8 @@
     "appId": "com.WeFlow.app",
     "publish": {
       "provider": "github",
+      "owner": "hicccc77",
+      "repo": "WeFlow",
       "releaseType": "release"
     },
     "productName": "WeFlow",
@@ -96,6 +107,10 @@
       {
         "from": "public/icon.ico",
         "to": "icon.ico"
+      },
+      {
+        "from": "electron/assets/wasm/",
+        "to": "assets/wasm/"
       }
     ],
     "files": [
@@ -104,7 +119,26 @@
     ],
     "asarUnpack": [
       "node_modules/silk-wasm/**/*",
-      "node_modules/sherpa-onnx-node/**/*"
+      "node_modules/sherpa-onnx-node/**/*",
+      "node_modules/ffmpeg-static/**/*"
+    ],
+    "extraFiles": [
+      {
+        "from": "resources/msvcp140.dll",
+        "to": "."
+      },
+      {
+        "from": "resources/msvcp140_1.dll",
+        "to": "."
+      },
+      {
+        "from": "resources/vcruntime140.dll",
+        "to": "."
+      },
+      {
+        "from": "resources/vcruntime140_1.dll",
+        "to": "."
+      }
     ]
   }
 }

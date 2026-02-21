@@ -33,7 +33,8 @@ export default defineConfig({
                 'fsevents',
                 'whisper-node',
                 'shelljs',
-                'exceljs'
+                'exceljs',
+                'node-llama-cpp'
               ]
             }
           }
@@ -51,6 +52,24 @@ export default defineConfig({
               ],
               output: {
                 entryFileNames: 'annualReportWorker.js',
+                inlineDynamicImports: true
+              }
+            }
+          }
+        }
+      },
+      {
+        entry: 'electron/dualReportWorker.ts',
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: [
+                'koffi',
+                'fsevents'
+              ],
+              output: {
+                entryFileNames: 'dualReportWorker.js',
                 inlineDynamicImports: true
               }
             }

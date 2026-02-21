@@ -1,5 +1,5 @@
 import { join, dirname, basename, extname } from 'path'
-import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, copyFileSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, watch } from 'fs'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as https from 'https'
@@ -7,7 +7,7 @@ import * as http from 'http'
 import * as fzstd from 'fzstd'
 import * as crypto from 'crypto'
 import Database from 'better-sqlite3'
-import { app } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { MessageCacheService } from './messageCacheService'
@@ -30,6 +30,9 @@ export interface ChatSession {
   lastMsgType: number
   displayName?: string
   avatarUrl?: string
+  lastMsgSender?: string
+  lastSenderDisplayName?: string
+  selfWxid?: string
 }
 
 export interface Message {
@@ -47,6 +50,9 @@ export interface Message {
   emojiCdnUrl?: string
   emojiMd5?: string
   emojiLocalPath?: string  // 本地缓存 castle 路径
+  emojiThumbUrl?: string
+  emojiEncryptUrl?: string
+  emojiAesKey?: string
   // 引用消息相关
   quotedContent?: string
   quotedSender?: string
@@ -58,6 +64,30 @@ export interface Message {
   encrypVer?: number
   cdnThumbUrl?: string
   voiceDurationSeconds?: number
+  // Type 49 细分字段
+  linkTitle?: string        // 链接/文件标题
+  linkUrl?: string          // 链接 URL
+  linkThumb?: string        // 链接缩略图
+  fileName?: string         // 文件名
+  fileSize?: number         // 文件大小
+  fileExt?: string          // 文件扩展名
+  xmlType?: string          // XML 中的 type 字段
+  // 名片消息
+  cardUsername?: string     // 名片的微信ID
+  cardNickname?: string     // 名片的昵称
+  // 转账消息
+  transferPayerUsername?: string   // 转账付款人
+  transferReceiverUsername?: string // 转账收款人
+  // 聊天记录
+  chatRecordTitle?: string  // 聊天记录标题
+  chatRecordList?: Array<{
+    datatype: number
+    sourcename: string
+    sourcetime: string
+    datadesc: string
+    datatitle?: string
+  }>
+  _db_path?: string // 内部字段：记录消息所属数据库路径
 }
 
 export interface Contact {
@@ -67,6 +97,15 @@ export interface Contact {
   nickName: string
 }
 
+export interface ContactInfo {
+  username: string
+  displayName: string
+  remark?: string
+  nickname?: string
+  avatarUrl?: string
+  type: 'friend' | 'group' | 'official' | 'former_friend' | 'other'
+}
+
 // 表情包缓存
 const emojiCache: Map<string, string> = new Map()
 const emojiDownloading: Map<string, Promise<string | null>> = new Map()
@@ -74,7 +113,7 @@ const emojiDownloading: Map<string, Promise<string | null>> = new Map()
 class ChatService {
   private configService: ConfigService
   private connected = false
-  private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number }> = new Map()
+  private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number; startTime?: number; endTime?: number; ascending?: boolean; bufferedMessages?: any[] }> = new Map()
   private readonly messageBatchDefault = 50
   private avatarCache: Map<string, ContactCacheEntry>
   private readonly avatarCacheTtlMs = 10 * 60 * 1000
@@ -85,10 +124,13 @@ class ChatService {
   private voiceWavCache = new Map<string, Buffer>()
   private voiceTranscriptCache = new Map<string, string>()
   private voiceTranscriptPending = new Map<string, Promise<{ success: boolean; transcript?: string; error?: string }>>()
+  private transcriptCacheLoaded = false
+  private transcriptCacheDirty = false
+  private transcriptFlushTimer: ReturnType<typeof setTimeout> | null = null
   private mediaDbsCache: string[] | null = null
   private mediaDbsCacheTime = 0
   private readonly mediaDbsCacheTtl = 300000 // 5分钟
-  private readonly voiceCacheMaxEntries = 50
+  private readonly voiceWavCacheMaxEntries = 50
   // 缓存 media.db 的表结构信息
   private mediaDbSchemaCache = new Map<string, {
     voiceTable: string
@@ -97,13 +139,16 @@ class ChatService {
     timeColumn?: string
     name2IdTable?: string
   }>()
+  // 缓存会话表信息，避免每次查询
+  private sessionTablesCache = new Map<string, Array<{ tableName: string; dbPath: string }>>()
+  private readonly sessionTablesCacheTtl = 300000 // 5分钟
 
   constructor() {
     this.configService = new ConfigService()
-    this.contactCacheService = new ContactCacheService(this.configService.get('cachePath'))
+    this.contactCacheService = new ContactCacheService(this.configService.getCacheBasePath())
     const persisted = this.contactCacheService.getAllEntries()
     this.avatarCache = new Map(Object.entries(persisted))
-    this.messageCacheService = new MessageCacheService(this.configService.get('cachePath'))
+    this.messageCacheService = new MessageCacheService(this.configService.getCacheBasePath())
   }
 
   /**
@@ -120,9 +165,9 @@ class ChatService {
     }
 
     const suffixMatch = trimmed.match(/^(.+)_([a-zA-Z0-9]{4})$/)
-    if (suffixMatch) return suffixMatch[1]
+    const cleaned = suffixMatch ? suffixMatch[1] : trimmed
 
-    return trimmed
+    return cleaned
   }
 
   /**
@@ -154,6 +199,9 @@ class ChatService {
 
       this.connected = true
 
+      // 设置数据库监控
+      this.setupDbMonitor()
+
       // 预热 listMediaDbs 缓存（后台异步执行，不阻塞连接）
       this.warmupMediaDbsCache()
 
@@ -162,6 +210,24 @@ class ChatService {
       console.error('ChatService: 连接数据库失败:', e)
       return { success: false, error: String(e) }
     }
+  }
+
+  private monitorSetup = false
+
+  private setupDbMonitor() {
+    if (this.monitorSetup) return
+    this.monitorSetup = true
+
+    // 使用 C++ DLL 内部的文件监控 (ReadDirectoryChangesW)
+    // 这种方式更高效，且不占用 JS 线程，并能直接监听 session/message 目录变更
+    wcdbService.setMonitor((type, json) => {
+      // 广播给所有渲染进程窗口
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) {
+          win.webContents.send('wcdb-change', { type, json })
+        }
+      })
+    })
   }
 
   /**
@@ -208,6 +274,32 @@ class ChatService {
   }
 
   /**
+   * 修改消息内容
+   */
+  async updateMessage(sessionId: string, localId: number, createTime: number, newContent: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) return { success: false, error: connectResult.error }
+      return await wcdbService.updateMessage(sessionId, localId, createTime, newContent)
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  /**
+   * 删除消息
+   */
+  async deleteMessage(sessionId: string, localId: number, createTime: number, dbPathHint?: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) return { success: false, error: connectResult.error }
+      return await wcdbService.deleteMessage(sessionId, localId, createTime, dbPathHint)
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  /**
    * 获取会话列表（优化：先返回基础数据，不等待联系人信息加载）
    */
   async getSessions(): Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> {
@@ -234,6 +326,7 @@ class ChatService {
       // 转换为 ChatSession（先加载缓存，但不等待数据库查询）
       const sessions: ChatSession[] = []
       const now = Date.now()
+      const myWxid = this.configService.get('myWxid')
 
       for (const row of rows) {
         const username =
@@ -287,7 +380,10 @@ class ChatService {
           lastTimestamp: lastTs,
           lastMsgType,
           displayName,
-          avatarUrl
+          avatarUrl,
+          lastMsgSender: row.last_msg_sender, // 数据库返回字段
+          lastSenderDisplayName: row.last_sender_display_name, // 数据库返回字段
+          selfWxid: myWxid
         })
       }
 
@@ -326,7 +422,11 @@ class ChatService {
       // 检查缓存
       for (const username of usernames) {
         const cached = this.avatarCache.get(username)
-        if (cached && now - cached.updatedAt < this.avatarCacheTtlMs) {
+        // 如果缓存有效且有头像，直接使用；如果没有头像，也需要重新尝试获取
+        // 额外检查：如果头像是无效的 hex 格式（以 ffd8 开头），也需要重新获取
+        const isValidAvatar = cached?.avatarUrl &&
+          !cached.avatarUrl.includes('base64,ffd8') // 检测错误的 hex 格式
+        if (cached && now - cached.updatedAt < this.avatarCacheTtlMs && isValidAvatar) {
           result[username] = {
             displayName: cached.displayName,
             avatarUrl: cached.avatarUrl
@@ -343,9 +443,17 @@ class ChatService {
           wcdbService.getAvatarUrls(missing)
         ])
 
+        // 收集没有头像 URL 的用户名
+        const missingAvatars: string[] = []
+
         for (const username of missing) {
           const displayName = displayNames.success && displayNames.map ? displayNames.map[username] : undefined
-          const avatarUrl = avatarUrls.success && avatarUrls.map ? avatarUrls.map[username] : undefined
+          let avatarUrl = avatarUrls.success && avatarUrls.map ? avatarUrls.map[username] : undefined
+
+          // 如果没有头像 URL，记录下来稍后从 head_image.db 获取
+          if (!avatarUrl) {
+            missingAvatars.push(username)
+          }
 
           const cacheEntry: ContactCacheEntry = {
             displayName: displayName || username,
@@ -357,6 +465,23 @@ class ChatService {
           this.avatarCache.set(username, cacheEntry)
           updatedEntries[username] = cacheEntry
         }
+
+        // 从 head_image.db 获取缺失的头像
+        if (missingAvatars.length > 0) {
+          const headImageAvatars = await this.getAvatarsFromHeadImageDb(missingAvatars)
+          for (const username of missingAvatars) {
+            const avatarUrl = headImageAvatars[username]
+            if (avatarUrl) {
+              result[username].avatarUrl = avatarUrl
+              const cached = this.avatarCache.get(username)
+              if (cached) {
+                cached.avatarUrl = avatarUrl
+                updatedEntries[username] = cached
+              }
+            }
+          }
+        }
+
         if (Object.keys(updatedEntries).length > 0) {
           this.contactCacheService.setEntries(updatedEntries)
         }
@@ -366,6 +491,81 @@ class ChatService {
       console.error('ChatService: 补充联系人信息失败:', e)
       return { success: false, error: String(e) }
     }
+  }
+
+  /**
+   * 从 head_image.db 批量获取头像（转换为 base64 data URL）
+   */
+  private async getAvatarsFromHeadImageDb(usernames: string[]): Promise<Record<string, string>> {
+    const result: Record<string, string> = {}
+    if (usernames.length === 0) return result
+
+    try {
+      const dbPath = this.configService.get('dbPath')
+      const wxid = this.configService.get('myWxid')
+      if (!dbPath || !wxid) return result
+
+      const accountDir = this.resolveAccountDir(dbPath, wxid)
+      if (!accountDir) return result
+
+      // head_image.db 可能在不同位置
+      const headImageDbPaths = [
+        join(accountDir, 'db_storage', 'head_image', 'head_image.db'),
+        join(accountDir, 'db_storage', 'head_image.db'),
+        join(accountDir, 'head_image.db')
+      ]
+
+      let headImageDbPath: string | null = null
+      for (const path of headImageDbPaths) {
+        if (existsSync(path)) {
+          headImageDbPath = path
+          break
+        }
+      }
+
+      if (!headImageDbPath) return result
+
+      // 使用 wcdbService.execQuery 查询加密的 head_image.db
+      for (const username of usernames) {
+        try {
+          const escapedUsername = username.replace(/'/g, "''")
+          const queryResult = await wcdbService.execQuery(
+            'media',
+            headImageDbPath,
+            `SELECT image_buffer FROM head_image WHERE username = '${escapedUsername}' LIMIT 1`
+          )
+
+          if (queryResult.success && queryResult.rows && queryResult.rows.length > 0) {
+            const row = queryResult.rows[0] as any
+            if (row?.image_buffer) {
+              let base64Data: string
+              if (typeof row.image_buffer === 'string') {
+                // WCDB 返回的 BLOB 是十六进制字符串，需要转换为 base64
+                if (row.image_buffer.toLowerCase().startsWith('ffd8')) {
+                  const buffer = Buffer.from(row.image_buffer, 'hex')
+                  base64Data = buffer.toString('base64')
+                } else {
+                  base64Data = row.image_buffer
+                }
+              } else if (Buffer.isBuffer(row.image_buffer)) {
+                base64Data = row.image_buffer.toString('base64')
+              } else if (Array.isArray(row.image_buffer)) {
+                base64Data = Buffer.from(row.image_buffer).toString('base64')
+              } else {
+                continue
+              }
+              result[username] = `data:image/jpeg;base64,${base64Data}`
+            }
+          }
+        } catch {
+          // 静默处理单个用户的错误
+        }
+      }
+    } catch (e) {
+      console.error('从 head_image.db 获取头像失败:', e)
+    }
+
+    return result
   }
 
   /**
@@ -391,12 +591,135 @@ class ChatService {
   }
 
   /**
+   * 获取通讯录列表
+   */
+  async getContacts(): Promise<{ success: boolean; contacts?: ContactInfo[]; error?: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) {
+        return { success: false, error: connectResult.error }
+      }
+
+      // 使用execQuery直接查询加密的contact.db
+      // kind='contact', path=null表示使用已打开的contact.db
+      const contactQuery = `
+        SELECT username, remark, nick_name, alias, local_type, flag, quan_pin
+        FROM contact
+      `
+
+
+      const contactResult = await wcdbService.execQuery('contact', null, contactQuery)
+
+      if (!contactResult.success || !contactResult.rows) {
+        console.error('查询联系人失败:', contactResult.error)
+        return { success: false, error: contactResult.error || '查询联系人失败' }
+      }
+
+
+      const rows = contactResult.rows as Record<string, any>[]
+
+      // 调试：显示前5条数据样本
+
+      rows.slice(0, 5).forEach((row, idx) => {
+
+      })
+
+      // 调试：统计local_type分布
+      const localTypeStats = new Map<number, number>()
+      rows.forEach(row => {
+        const lt = row.local_type || 0
+        localTypeStats.set(lt, (localTypeStats.get(lt) || 0) + 1)
+      })
+
+
+      // 获取会话表的最后联系时间用于排序
+      const lastContactTimeMap = new Map<string, number>()
+      const sessionResult = await wcdbService.getSessions()
+      if (sessionResult.success && sessionResult.sessions) {
+        for (const session of sessionResult.sessions as any[]) {
+          const username = session.username || session.user_name || session.userName || ''
+          const timestamp = session.sort_timestamp || session.sortTimestamp || 0
+          if (username && timestamp) {
+            lastContactTimeMap.set(username, timestamp)
+          }
+        }
+      }
+
+      // 转换为ContactInfo
+      const contacts: (ContactInfo & { lastContactTime: number })[] = []
+
+      for (const row of rows) {
+        const username = row.username || ''
+
+        if (!username) continue
+
+        const excludeNames = ['medianote', 'floatbottle', 'qmessage', 'qqmail', 'fmessage']
+        let type: 'friend' | 'group' | 'official' | 'former_friend' | 'other' = 'other'
+        const localType = this.getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], 0)
+        const flag = Number(row.flag ?? 0)
+        const quanPin = this.getRowField(row, ['quan_pin', 'quanPin', 'WCDB_CT_quan_pin']) || ''
+
+        if (username.includes('@chatroom')) {
+          type = 'group'
+        } else if (username.startsWith('gh_')) {
+          type = 'official'
+        } else if (/^(?!.*(gh_|@chatroom)).*$/.test(username) && localType === 1 && !excludeNames.includes(username)) {
+          type = 'friend'
+        } else if (/^(?!.*(gh_|@chatroom)).*$/.test(username) && localType === 0 && quanPin) {
+          type = 'former_friend'
+        } else {
+          continue
+        }
+
+        const displayName = row.remark || row.nick_name || row.alias || username
+
+        contacts.push({
+          username,
+          displayName,
+          remark: row.remark || undefined,
+          nickname: row.nick_name || undefined,
+          avatarUrl: undefined,
+          type,
+          lastContactTime: lastContactTimeMap.get(username) || 0
+        })
+      }
+
+
+
+
+      // 按最近联系时间排序
+      contacts.sort((a, b) => {
+        const timeA = a.lastContactTime || 0
+        const timeB = b.lastContactTime || 0
+        if (timeA && timeB) {
+          return timeB - timeA
+        }
+        if (timeA && !timeB) return -1
+        if (!timeA && timeB) return 1
+        return a.displayName.localeCompare(b.displayName, 'zh-CN')
+      })
+
+      // 移除临时的lastContactTime字段
+      const result = contacts.map(({ lastContactTime, ...rest }) => rest)
+
+
+      return { success: true, contacts: result }
+    } catch (e) {
+      console.error('ChatService: 获取通讯录失败:', e)
+      return { success: false, error: String(e) }
+    }
+  }
+
+  /**
    * 获取消息列表（支持跨多个数据库合并，已优化）
    */
   async getMessages(
     sessionId: string,
     offset: number = 0,
-    limit: number = 50
+    limit: number = 50,
+    startTime: number = 0,
+    endTime: number = 0,
+    ascending: boolean = false
   ): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; error?: string }> {
     try {
       const connectResult = await this.ensureConnected()
@@ -411,7 +734,14 @@ class ChatService {
       // 1. 没有游标状态
       // 2. offset 为 0 (重新加载会话)
       // 3. batchSize 改变
-      const needNewCursor = !state || offset === 0 || state.batchSize !== batchSize
+      // 4. startTime/endTime 改变（视为全新查询）
+      // 5. ascending 改变
+      const needNewCursor = !state ||
+        offset !== state.fetched || // Offset mismatch -> must reset cursor
+        state.batchSize !== batchSize ||
+        state.startTime !== startTime ||
+        state.endTime !== endTime ||
+        state.ascending !== ascending
 
       if (needNewCursor) {
         // 关闭旧游标
@@ -424,43 +754,64 @@ class ChatService {
         }
 
         // 创建新游标
-        const cursorResult = await wcdbService.openMessageCursor(sessionId, batchSize, false, 0, 0)
+        // 注意：WeFlow 数据库中的 create_time 是以秒为单位的
+        const beginTimestamp = startTime > 10000000000 ? Math.floor(startTime / 1000) : startTime
+        const endTimestamp = endTime > 10000000000 ? Math.floor(endTime / 1000) : endTime
+        const cursorResult = await wcdbService.openMessageCursor(sessionId, batchSize, ascending, beginTimestamp, endTimestamp)
         if (!cursorResult.success || !cursorResult.cursor) {
           console.error('[ChatService] 打开消息游标失败:', cursorResult.error)
           return { success: false, error: cursorResult.error || '打开消息游标失败' }
         }
 
-        state = { cursor: cursorResult.cursor, fetched: 0, batchSize }
+        state = { cursor: cursorResult.cursor, fetched: 0, batchSize, startTime, endTime, ascending }
         this.messageCursors.set(sessionId, state)
 
         // 如果需要跳过消息(offset > 0),逐批获取但不返回
+        // 注意：仅在 offset === 0 时重建游标最安全；
+        // 当 startTime/endTime 变化导致重建时，offset 应由前端重置为 0
+        state.bufferedMessages = []
         if (offset > 0) {
-          console.log(`[ChatService] 跳过消息: offset=${offset}`)
+          console.warn(`[ChatService] 新游标需跳过 ${offset} 条消息（startTime=${startTime}, endTime=${endTime}）`)
           let skipped = 0
-          while (skipped < offset) {
+          const maxSkipAttempts = Math.ceil(offset / batchSize) + 5 // 防止无限循环
+          let attempts = 0
+          while (skipped < offset && attempts < maxSkipAttempts) {
+            attempts++
             const skipBatch = await wcdbService.fetchMessageBatch(state.cursor)
             if (!skipBatch.success) {
               console.error('[ChatService] 跳过消息批次失败:', skipBatch.error)
               return { success: false, error: skipBatch.error || '跳过消息失败' }
             }
             if (!skipBatch.rows || skipBatch.rows.length === 0) {
-              console.log('[ChatService] 跳过时没有更多消息')
+              console.warn(`[ChatService] 跳过时数据耗尽: skipped=${skipped}/${offset}`)
               return { success: true, messages: [], hasMore: false }
             }
-            skipped += skipBatch.rows.length
-            state.fetched += skipBatch.rows.length
+
+            const count = skipBatch.rows.length
+            // Check if we overshot the offset
+            if (skipped + count > offset) {
+              const keepIndex = offset - skipped
+              if (keepIndex < count) {
+                state.bufferedMessages = skipBatch.rows.slice(keepIndex)
+              }
+            }
+
+            skipped += count
+            state.fetched += count
+
+            // If satisfied offset, break
+            if (skipped >= offset) break;
+
             if (!skipBatch.hasMore) {
-              console.log('[ChatService] 跳过时已到达末尾')
+              console.warn(`[ChatService] 跳过后无更多数据: skipped=${skipped}/${offset}`)
               return { success: true, messages: [], hasMore: false }
             }
           }
-          console.log(`[ChatService] 跳过完成: skipped=${skipped}, fetched=${state.fetched}`)
+          if (attempts >= maxSkipAttempts) {
+            console.error(`[ChatService] 跳过消息超过最大尝试次数: attempts=${attempts}`)
+          }
+          console.log(`[ChatService] 跳过完成: skipped=${skipped}, fetched=${state.fetched}, buffered=${state.bufferedMessages?.length || 0}`)
         }
-      } else if (state && offset !== state.fetched) {
-        // offset 与 fetched 不匹配,说明状态不一致
-        console.warn(`[ChatService] 游标状态不一致: offset=${offset}, fetched=${state.fetched}, 继续使用现有游标`)
-        // 不重新创建游标,而是继续使用现有游标
-        // 这样可以避免频繁重建导致的问题
       }
 
       // 确保 state 已初始化
@@ -470,19 +821,35 @@ class ChatService {
       }
 
       // 获取当前批次的消息
-      const batch = await wcdbService.fetchMessageBatch(state.cursor)
-      if (!batch.success) {
-        console.error('[ChatService] 获取消息批次失败:', batch.error)
-        return { success: false, error: batch.error || '获取消息失败' }
+      // Use buffered rows from skip logic if available
+      let rows: any[] = state.bufferedMessages || []
+      state.bufferedMessages = undefined // Clear buffer after use
+
+      // If buffer is not enough to fill a batch, try to fetch more
+      // Or if buffer is empty, fetch a batch
+      if (rows.length < batchSize) {
+        const nextBatch = await wcdbService.fetchMessageBatch(state.cursor)
+        if (nextBatch.success && nextBatch.rows) {
+          rows = rows.concat(nextBatch.rows)
+          state.fetched += nextBatch.rows.length
+        } else if (!nextBatch.success) {
+          console.error('[ChatService] 获取消息批次失败:', nextBatch.error)
+          // If we have some buffered rows, we can still return them? 
+          // Or fail? Let's return what we have if any, otherwise fail.
+          if (rows.length === 0) {
+            return { success: false, error: nextBatch.error || '获取消息失败' }
+          }
+        }
       }
 
-      if (!batch.rows) {
-        console.error('[ChatService] 获取消息失败: 返回数据为空')
-        return { success: false, error: '获取消息失败: 返回数据为空' }
+      // If we have more than limit (due to buffer + full batch), slice it
+      if (rows.length > limit) {
+        rows = rows.slice(0, limit)
+        // Note: We don't adjust state.fetched here because it tracks cursor position.
+        // Next time offset will catch up or mismatch trigger reset.
       }
 
-      const rows = batch.rows as Record<string, any>[]
-      const hasMore = batch.hasMore === true
+      const hasMore = rows.length > 0 // Simplified hasMore check for now, can be improved
 
       const normalized = this.normalizeMessageOrder(this.mapRowsToMessages(rows))
 
@@ -617,6 +984,40 @@ class ChatService {
     }
   }
 
+  async getNewMessages(sessionId: string, minTime: number, limit: number = this.messageBatchDefault): Promise<{ success: boolean; messages?: Message[]; error?: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) {
+        return { success: false, error: connectResult.error || '数据库未连接' }
+      }
+
+      const res = await wcdbService.getNewMessages(sessionId, minTime, limit)
+      if (!res.success || !res.messages) {
+        return { success: false, error: res.error || '获取新消息失败' }
+      }
+
+      // 转换为 Message 对象
+      const messages = this.mapRowsToMessages(res.messages as Record<string, any>[])
+      const normalized = this.normalizeMessageOrder(messages)
+
+      // 并发检查并修复缺失 CDN URL 的表情包
+      const fixPromises: Promise<void>[] = []
+      for (const msg of normalized) {
+        if (msg.localType === 47 && !msg.emojiCdnUrl && msg.emojiMd5) {
+          fixPromises.push(this.fallbackEmoticon(msg))
+        }
+      }
+      if (fixPromises.length > 0) {
+        await Promise.allSettled(fixPromises)
+      }
+
+      return { success: true, messages: normalized }
+    } catch (e) {
+      console.error('ChatService: 获取增量消息失败:', e)
+      return { success: false, error: String(e) }
+    }
+  }
+
   private normalizeMessageOrder(messages: Message[]): Message[] {
     if (messages.length < 2) return messages
     const first = messages[0]
@@ -689,6 +1090,13 @@ class ChatService {
     return Number.isFinite(parsed) ? parsed : NaN
   }
 
+  /**
+   * HTTP API 复用消息解析逻辑，确保和应用内展示一致。
+   */
+  mapRowsToMessagesForApi(rows: Record<string, any>[]): Message[] {
+    return this.mapRowsToMessages(rows)
+  }
+
   private mapRowsToMessages(rows: Record<string, any>[]): Message[] {
     const myWxid = this.configService.get('myWxid')
     const cleanedWxid = myWxid ? this.cleanAccountDirName(myWxid) : null
@@ -723,13 +1131,19 @@ class ChatService {
 
       if (senderUsername && (myWxidLower || cleanedWxidLower)) {
         const senderLower = String(senderUsername).toLowerCase()
-        const expectedIsSend = (senderLower === myWxidLower || senderLower === cleanedWxidLower) ? 1 : 0
+        const expectedIsSend = (
+          senderLower === myWxidLower ||
+          senderLower === cleanedWxidLower ||
+          // 兼容非 wxid 开头的账号（如果文件夹名带后缀，如 custom_backup，而 sender 是 custom）
+          (myWxidLower && myWxidLower.startsWith(senderLower + '_')) ||
+          (cleanedWxidLower && cleanedWxidLower.startsWith(senderLower + '_'))
+        ) ? 1 : 0
         if (isSend === null) {
           isSend = expectedIsSend
           // [DEBUG] Issue #34: 记录 isSend 推断过程
           if (expectedIsSend === 0 && localType === 1) {
             // 仅在被判为接收且是文本消息时记录，避免刷屏
-            // console.log(`[ChatService] inferred isSend=0: sender=${senderUsername}, myWxid=${myWxid} (cleaned=${cleanedWxid})`)
+            // 
           }
         }
       } else if (senderUsername && !myWxid) {
@@ -750,11 +1164,37 @@ class ChatService {
       let encrypVer: number | undefined
       let cdnThumbUrl: string | undefined
       let voiceDurationSeconds: number | undefined
+      // Type 49 细分字段
+      let linkTitle: string | undefined
+      let linkUrl: string | undefined
+      let linkThumb: string | undefined
+      let fileName: string | undefined
+      let fileSize: number | undefined
+      let fileExt: string | undefined
+      let xmlType: string | undefined
+      // 名片消息
+      let cardUsername: string | undefined
+      let cardNickname: string | undefined
+      // 转账消息
+      let transferPayerUsername: string | undefined
+      let transferReceiverUsername: string | undefined
+      // 聊天记录
+      let chatRecordTitle: string | undefined
+      let chatRecordList: Array<{
+        datatype: number
+        sourcename: string
+        sourcetime: string
+        datadesc: string
+        datatitle?: string
+      }> | undefined
 
       if (localType === 47 && content) {
         const emojiInfo = this.parseEmojiInfo(content)
         emojiCdnUrl = emojiInfo.cdnUrl
         emojiMd5 = emojiInfo.md5
+        cdnThumbUrl = emojiInfo.thumbUrl // 复用 cdnThumbUrl 字段或使用 emojiThumbUrl
+        // 注意：Message 接口定义的 emojiThumbUrl，这里我们统一一下
+        // 如果 Message 接口有 emojiThumbUrl，则使用它
       } else if (localType === 3 && content) {
         const imageInfo = this.parseImageInfo(content)
         imageMd5 = imageInfo.md5
@@ -767,6 +1207,25 @@ class ChatService {
         videoMd5 = this.parseVideoMd5(content)
       } else if (localType === 34 && content) {
         voiceDurationSeconds = this.parseVoiceDurationSeconds(content)
+      } else if (localType === 42 && content) {
+        // 名片消息
+        const cardInfo = this.parseCardInfo(content)
+        cardUsername = cardInfo.username
+        cardNickname = cardInfo.nickname
+      } else if ((localType === 49 || localType === 8589934592049) && content) {
+        // Type 49 消息（链接、文件、小程序、转账等），8589934592049 也是转账类型
+        const type49Info = this.parseType49Message(content)
+        xmlType = type49Info.xmlType
+        linkTitle = type49Info.linkTitle
+        linkUrl = type49Info.linkUrl
+        linkThumb = type49Info.linkThumb
+        fileName = type49Info.fileName
+        fileSize = type49Info.fileSize
+        fileExt = type49Info.fileExt
+        chatRecordTitle = type49Info.chatRecordTitle
+        chatRecordList = type49Info.chatRecordList
+        transferPayerUsername = type49Info.transferPayerUsername
+        transferReceiverUsername = type49Info.transferReceiverUsername
       } else if (localType === 244813135921 || (content && content.includes('<type>57</type>'))) {
         const quoteInfo = this.parseQuoteMessage(content)
         quotedContent = quoteInfo.content
@@ -793,7 +1252,20 @@ class ChatService {
         voiceDurationSeconds,
         aesKey,
         encrypVer,
-        cdnThumbUrl
+        cdnThumbUrl,
+        linkTitle,
+        linkUrl,
+        linkThumb,
+        fileName,
+        fileSize,
+        fileExt,
+        xmlType,
+        cardUsername,
+        cardNickname,
+        transferPayerUsername,
+        transferReceiverUsername,
+        chatRecordTitle,
+        chatRecordList
       })
       const last = messages[messages.length - 1]
       if ((last.localType === 3 || last.localType === 34) && (last.localId === 0 || last.createTime === 0)) {
@@ -853,7 +1325,7 @@ class ChatService {
         const title = this.extractXmlValue(content, 'title')
         return title || '[引用消息]'
       case 266287972401:
-        return '[拍一拍]'
+        return this.cleanPatMessage(content)
       case 81604378673:
         return '[聊天记录]'
       case 8594229559345:
@@ -861,6 +1333,15 @@ class ChatService {
       case 8589934592049:
         return '[转账]'
       default:
+        // 检查是否是 type=87 的群公告消息
+        if (xmlType === '87') {
+          const textAnnouncement = this.extractXmlValue(content, 'textannouncement')
+          if (textAnnouncement) {
+            return `[群公告] ${textAnnouncement}`
+          }
+          return '[群公告]'
+        }
+
         // 检查是否是 type=57 的引用消息
         if (xmlType === '57') {
           const title = this.extractXmlValue(content, 'title')
@@ -884,6 +1365,15 @@ class ChatService {
     const title = this.extractXmlValue(content, 'title')
     const type = this.extractXmlValue(content, 'type')
 
+    // 群公告消息（type 87）特殊处理
+    if (type === '87') {
+      const textAnnouncement = this.extractXmlValue(content, 'textannouncement')
+      if (textAnnouncement) {
+        return `[群公告] ${textAnnouncement}`
+      }
+      return '[群公告]'
+    }
+
     if (title) {
       switch (type) {
         case '5':
@@ -891,23 +1381,43 @@ class ChatService {
           return `[链接] ${title}`
         case '6':
           return `[文件] ${title}`
+        case '19':
+          return `[聊天记录] ${title}`
         case '33':
         case '36':
           return `[小程序] ${title}`
         case '57':
           // 引用消息，title 就是回复的内容
           return title
+        case '2000':
+          return `[转账] ${title}`
         default:
           return title
       }
     }
-    return '[消息]'
+
+    // 如果没有 title，根据 type 返回默认标签
+    switch (type) {
+      case '6':
+        return '[文件]'
+      case '19':
+        return '[聊天记录]'
+      case '33':
+      case '36':
+        return '[小程序]'
+      case '2000':
+        return '[转账]'
+      case '87':
+        return '[群公告]'
+      default:
+        return '[消息]'
+    }
   }
 
   /**
    * 解析表情包信息
    */
-  private parseEmojiInfo(content: string): { cdnUrl?: string; md5?: string } {
+  private parseEmojiInfo(content: string): { cdnUrl?: string; md5?: string; thumbUrl?: string; encryptUrl?: string; aesKey?: string } {
     try {
       // 提取 cdnurl
       let cdnUrl: string | undefined
@@ -921,16 +1431,15 @@ class ChatService {
         }
       }
 
-      // 如果没有 cdnurl，尝试 thumburl
-      if (!cdnUrl) {
-        const thumbUrlMatch = /thumburl\s*=\s*['"]([^'"]+)['"]/i.exec(content) || /thumburl\s*=\s*([^'"]+?)(?=\s|\/|>)/i.exec(content)
-        if (thumbUrlMatch) {
-          cdnUrl = thumbUrlMatch[1].replace(/&amp;/g, '&')
-          if (cdnUrl.includes('%')) {
-            try {
-              cdnUrl = decodeURIComponent(cdnUrl)
-            } catch { }
-          }
+      // 提取 thumburl
+      let thumbUrl: string | undefined
+      const thumbUrlMatch = /thumburl\s*=\s*['"]([^'"]+)['"]/i.exec(content) || /thumburl\s*=\s*([^'"]+?)(?=\s|\/|>)/i.exec(content)
+      if (thumbUrlMatch) {
+        thumbUrl = thumbUrlMatch[1].replace(/&amp;/g, '&')
+        if (thumbUrl.includes('%')) {
+          try {
+            thumbUrl = decodeURIComponent(thumbUrl)
+          } catch { }
         }
       }
 
@@ -938,9 +1447,23 @@ class ChatService {
       const md5Match = /md5\s*=\s*['"]([a-fA-F0-9]+)['"]/i.exec(content) || /md5\s*=\s*([a-fA-F0-9]+)/i.exec(content)
       const md5 = md5Match ? md5Match[1] : undefined
 
-      // 不构造假 URL，只返回真正的 cdnurl
-      // 没有 cdnUrl 时保持静默，交由后续回退逻辑处理
-      return { cdnUrl, md5 }
+      // 提取 encrypturl
+      let encryptUrl: string | undefined
+      const encryptUrlMatch = /encrypturl\s*=\s*['"]([^'"]+)['"]/i.exec(content) || /encrypturl\s*=\s*([^'"]+?)(?=\s|\/|>)/i.exec(content)
+      if (encryptUrlMatch) {
+        encryptUrl = encryptUrlMatch[1].replace(/&amp;/g, '&')
+        if (encryptUrl.includes('%')) {
+          try {
+            encryptUrl = decodeURIComponent(encryptUrl)
+          } catch { }
+        }
+      }
+
+      // 提取 aeskey
+      const aesKeyMatch = /aeskey\s*=\s*['"]([a-zA-Z0-9]+)['"]/i.exec(content) || /aeskey\s*=\s*([a-zA-Z0-9]+)/i.exec(content)
+      const aesKey = aesKeyMatch ? aesKeyMatch[1] : undefined
+
+      return { cdnUrl, md5, thumbUrl, encryptUrl, aesKey }
     } catch (e) {
       console.error('[ChatService] 表情包解析失败:', e, { xml: content })
       return {}
@@ -1181,6 +1704,197 @@ class ChatService {
         sender: displayName || undefined
       }
     } catch {
+      return {}
+    }
+  }
+
+  /**
+   * 解析名片消息
+   * 格式: <msg username="wxid_xxx" nickname="昵称" ... />
+   */
+  private parseCardInfo(content: string): { username?: string; nickname?: string } {
+    try {
+      if (!content) return {}
+
+      // 提取 username
+      const username = this.extractXmlAttribute(content, 'msg', 'username') || undefined
+
+      // 提取 nickname
+      const nickname = this.extractXmlAttribute(content, 'msg', 'nickname') || undefined
+
+      return { username, nickname }
+    } catch (e) {
+      console.error('[ChatService] 名片解析失败:', e)
+      return {}
+    }
+  }
+
+  /**
+   * 解析 Type 49 消息（链接、文件、小程序、转账等）
+   * 根据 <appmsg><type>X</type> 区分不同类型
+   */
+  private parseType49Message(content: string): {
+    xmlType?: string
+    linkTitle?: string
+    linkUrl?: string
+    linkThumb?: string
+    fileName?: string
+    fileSize?: number
+    fileExt?: string
+    transferPayerUsername?: string
+    transferReceiverUsername?: string
+    chatRecordTitle?: string
+    chatRecordList?: Array<{
+      datatype: number
+      sourcename: string
+      sourcetime: string
+      datadesc: string
+      datatitle?: string
+    }>
+  } {
+    try {
+      if (!content) return {}
+
+      // 提取 appmsg 中的 type
+      const xmlType = this.extractXmlValue(content, 'type')
+      if (!xmlType) return {}
+
+      const result: any = { xmlType }
+
+      // 提取通用字段
+      const title = this.extractXmlValue(content, 'title')
+      const url = this.extractXmlValue(content, 'url')
+
+      switch (xmlType) {
+        case '6': {
+          // 文件消息
+          result.fileName = title || this.extractXmlValue(content, 'filename')
+          result.linkTitle = result.fileName
+
+          // 提取文件大小
+          const fileSizeStr = this.extractXmlValue(content, 'totallen') ||
+            this.extractXmlValue(content, 'filesize')
+          if (fileSizeStr) {
+            const size = parseInt(fileSizeStr, 10)
+            if (!isNaN(size)) {
+              result.fileSize = size
+            }
+          }
+
+          // 提取文件扩展名
+          const fileExt = this.extractXmlValue(content, 'fileext')
+          if (fileExt) {
+            result.fileExt = fileExt
+          } else if (result.fileName) {
+            // 从文件名提取扩展名
+            const match = /\.([^.]+)$/.exec(result.fileName)
+            if (match) {
+              result.fileExt = match[1]
+            }
+          }
+          break
+        }
+
+        case '19': {
+          // 聊天记录
+          result.chatRecordTitle = title || '聊天记录'
+
+          // 解析聊天记录列表
+          const recordList: Array<{
+            datatype: number
+            sourcename: string
+            sourcetime: string
+            datadesc: string
+            datatitle?: string
+          }> = []
+
+          // 查找所有 <recorditem> 标签
+          const recordItemRegex = /<recorditem>([\s\S]*?)<\/recorditem>/gi
+          let match: RegExpExecArray | null
+
+          while ((match = recordItemRegex.exec(content)) !== null) {
+            const itemXml = match[1]
+
+            const datatypeStr = this.extractXmlValue(itemXml, 'datatype')
+            const sourcename = this.extractXmlValue(itemXml, 'sourcename')
+            const sourcetime = this.extractXmlValue(itemXml, 'sourcetime')
+            const datadesc = this.extractXmlValue(itemXml, 'datadesc')
+            const datatitle = this.extractXmlValue(itemXml, 'datatitle')
+
+            if (sourcename && datadesc) {
+              recordList.push({
+                datatype: datatypeStr ? parseInt(datatypeStr, 10) : 0,
+                sourcename,
+                sourcetime: sourcetime || '',
+                datadesc,
+                datatitle: datatitle || undefined
+              })
+            }
+          }
+
+          if (recordList.length > 0) {
+            result.chatRecordList = recordList
+          }
+          break
+        }
+
+        case '33':
+        case '36': {
+          // 小程序
+          result.linkTitle = title
+          result.linkUrl = url
+
+          // 提取缩略图
+          const thumbUrl = this.extractXmlValue(content, 'thumburl') ||
+            this.extractXmlValue(content, 'cdnthumburl')
+          if (thumbUrl) {
+            result.linkThumb = thumbUrl
+          }
+          break
+        }
+
+        case '2000': {
+          // 转账
+          result.linkTitle = title || '[转账]'
+
+          // 可以提取转账金额等信息
+          const payMemo = this.extractXmlValue(content, 'pay_memo')
+          const feedesc = this.extractXmlValue(content, 'feedesc')
+
+          if (payMemo) {
+            result.linkTitle = payMemo
+          } else if (feedesc) {
+            result.linkTitle = feedesc
+          }
+
+          // 提取转账双方 wxid
+          const payerUsername = this.extractXmlValue(content, 'payer_username')
+          const receiverUsername = this.extractXmlValue(content, 'receiver_username')
+          if (payerUsername) {
+            result.transferPayerUsername = payerUsername
+          }
+          if (receiverUsername) {
+            result.transferReceiverUsername = receiverUsername
+          }
+          break
+        }
+
+        default: {
+          // 其他类型，提取通用字段
+          result.linkTitle = title
+          result.linkUrl = url
+
+          const thumbUrl = this.extractXmlValue(content, 'thumburl') ||
+            this.extractXmlValue(content, 'cdnthumburl')
+          if (thumbUrl) {
+            result.linkThumb = thumbUrl
+          }
+        }
+      }
+
+      return result
+    } catch (e) {
+      console.error('[ChatService] Type 49 消息解析失败:', e)
       return {}
     }
   }
@@ -1543,6 +2257,50 @@ class ChatService {
   }
 
   /**
+   * 清理拍一拍消息
+   * 格式示例:
+   *   纯文本: 我拍了拍 "梨绒" ງ໐໐໓ ຖiງht620000wxid_...
+   *   XML: <msg><appmsg...><title>"有幸"拍了拍"浩天空"相信未来!</title>...</msg>
+   */
+  private cleanPatMessage(content: string): string {
+    if (!content) return '[拍一拍]'
+
+    // 1. 优先从 XML <title> 标签提取内容
+    const titleMatch = /<title>([\s\S]*?)<\/title>/i.exec(content)
+    if (titleMatch) {
+      const title = titleMatch[1]
+        .replace(/<!\[CDATA\[/g, '')
+        .replace(/\]\]>/g, '')
+        .trim()
+      if (title) {
+        return `[拍一拍] ${title}`
+      }
+    }
+
+    // 2. 尝试匹配标准的 "A拍了拍B" 格式
+    const match = /^(.+?拍了拍.+?)(?:[\r\n]|$|ງ|wxid_)/.exec(content)
+    if (match) {
+      return `[拍一拍] ${match[1].trim()}`
+    }
+
+    // 3. 如果匹配失败，尝试清理掉疑似的 garbage (wxid, 乱码)
+    let cleaned = content.replace(/wxid_[a-zA-Z0-9_-]+/g, '') // 移除 wxid
+    cleaned = cleaned.replace(/[ງ໐໓ຖiht]+/g, ' ') // 移除已知的乱码字符
+    cleaned = cleaned.replace(/\d{6,}/g, '') // 移除长数字
+    cleaned = cleaned.replace(/\s+/g, ' ').trim() // 清理空格
+
+    // 移除不可见字符
+    cleaned = this.cleanUtf16(cleaned)
+
+    // 如果清理后还有内容，返回
+    if (cleaned && cleaned.length > 1 && !cleaned.includes('xml')) {
+      return `[拍一拍] ${cleaned}`
+    }
+
+    return '[拍一拍]'
+  }
+
+  /**
    * 解码消息内容（处理 BLOB 和压缩数据）
    */
   private decodeMessageContent(messageContent: any, compressContent: any): string {
@@ -1560,7 +2318,7 @@ class ChatService {
   private decodeMaybeCompressed(raw: any, fieldName: string = 'unknown'): string {
     if (!raw) return ''
 
-    // console.log(`[ChatService] Decoding ${fieldName}: type=${typeof raw}`, raw)
+    // 
 
     // 如果是 Buffer/Uint8Array
     if (Buffer.isBuffer(raw) || raw instanceof Uint8Array) {
@@ -1572,17 +2330,21 @@ class ChatService {
       if (raw.length === 0) return ''
 
       // 检查是否是 hex 编码
-      if (this.looksLikeHex(raw)) {
+      // 只有当字符串足够长（超过16字符）且看起来像 hex 时才尝试解码
+      // 短字符串（如 "123456" 等纯数字）容易被误判为 hex
+      if (raw.length > 16 && this.looksLikeHex(raw)) {
         const bytes = Buffer.from(raw, 'hex')
         if (bytes.length > 0) {
           const result = this.decodeBinaryContent(bytes, raw)
-          // console.log(`[ChatService] HEX decoded result: ${result}`)
+          // 
           return result
         }
       }
 
       // 检查是否是 base64 编码
-      if (this.looksLikeBase64(raw)) {
+      // 只有当字符串足够长（超过16字符）且看起来像 base64 时才尝试解码
+      // 短字符串（如 "test", "home" 等）容易被误判为 base64
+      if (raw.length > 16 && this.looksLikeBase64(raw)) {
         try {
           const bytes = Buffer.from(raw, 'base64')
           return this.decodeBinaryContent(bytes, raw)
@@ -1628,7 +2390,7 @@ class ChatService {
 
       // 如果提供了 fallbackValue，且解码结果看起来像二进制垃圾，则返回 fallbackValue
       if (fallbackValue && replacementCount > 0) {
-        // console.log(`[ChatService] Binary garbage detected, using fallback: ${fallbackValue}`)
+        // 
         return fallbackValue
       }
 
@@ -1706,7 +2468,9 @@ class ChatService {
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) return null
       const cached = this.avatarCache.get(username)
-      if (cached && cached.avatarUrl && Date.now() - cached.updatedAt < this.avatarCacheTtlMs) {
+      // 检查缓存是否有效，且头像不是错误的 hex 格式
+      const isValidAvatar = cached?.avatarUrl && !cached.avatarUrl.includes('base64,ffd8')
+      if (cached && isValidAvatar && Date.now() - cached.updatedAt < this.avatarCacheTtlMs) {
         return { avatarUrl: cached.avatarUrl, displayName: cached.displayName }
       }
 
@@ -1724,6 +2488,75 @@ class ChatService {
       return { avatarUrl, displayName }
     } catch {
       return null
+    }
+  }
+
+  /**
+   * 解析转账消息中的付款方和收款方显示名称
+   * 优先使用群昵称，群昵称为空时回退到微信昵称/备注
+   */
+  async resolveTransferDisplayNames(
+    chatroomId: string,
+    payerUsername: string,
+    receiverUsername: string
+  ): Promise<{ payerName: string; receiverName: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) {
+        return { payerName: payerUsername, receiverName: receiverUsername }
+      }
+
+      // 如果是群聊，尝试获取群昵称
+      let groupNicknames: Record<string, string> = {}
+      if (chatroomId.endsWith('@chatroom')) {
+        const nickResult = await wcdbService.getGroupNicknames(chatroomId)
+        if (nickResult.success && nickResult.nicknames) {
+          groupNicknames = nickResult.nicknames
+        }
+      }
+
+      // 获取当前用户 wxid，用于识别"自己"
+      const myWxid = this.configService.get('myWxid')
+      const cleanedMyWxid = myWxid ? this.cleanAccountDirName(myWxid) : ''
+
+      // 解析付款方名称：自己 > 群昵称 > 备注 > 昵称 > alias > wxid
+      const resolveName = async (username: string): Promise<string> => {
+        // 特判：如果是当前用户自己（contact 表通常不包含自己）
+        if (myWxid && (username === myWxid || username === cleanedMyWxid)) {
+          // 先查群昵称中是否有自己
+          const myGroupNick = groupNicknames[username]
+          if (myGroupNick) return myGroupNick
+          // 尝试从缓存获取自己的昵称
+          const cached = this.avatarCache.get(username) || this.avatarCache.get(myWxid)
+          if (cached?.displayName) return cached.displayName
+          return '我'
+        }
+
+        // 先查群昵称
+        const groupNick = groupNicknames[username]
+        if (groupNick) return groupNick
+
+        // 再查联系人信息
+        const contact = await this.getContact(username)
+        if (contact) {
+          return contact.remark || contact.nickName || contact.alias || username
+        }
+
+        // 兜底：查缓存
+        const cached = this.avatarCache.get(username)
+        if (cached?.displayName) return cached.displayName
+
+        return username
+      }
+
+      const [payerName, receiverName] = await Promise.all([
+        resolveName(payerUsername),
+        resolveName(receiverUsername)
+      ])
+
+      return { payerName, receiverName }
+    } catch {
+      return { payerName: payerUsername, receiverName: receiverUsername }
     }
   }
 
@@ -1846,11 +2679,7 @@ class ChatService {
     // 检查内存缓存
     const cached = emojiCache.get(cacheKey)
     if (cached && existsSync(cached)) {
-      // 读取文件并转为 data URL
-      const dataUrl = this.fileToDataUrl(cached)
-      if (dataUrl) {
-        return { success: true, localPath: dataUrl }
-      }
+      return { success: true, localPath: cached }
     }
 
     // 检查是否正在下载
@@ -1858,10 +2687,7 @@ class ChatService {
     if (downloading) {
       const result = await downloading
       if (result) {
-        const dataUrl = this.fileToDataUrl(result)
-        if (dataUrl) {
-          return { success: true, localPath: dataUrl }
-        }
+        return { success: true, localPath: result }
       }
       return { success: false, error: '下载失败' }
     }
@@ -1878,10 +2704,7 @@ class ChatService {
       const filePath = join(cacheDir, `${cacheKey}${ext}`)
       if (existsSync(filePath)) {
         emojiCache.set(cacheKey, filePath)
-        const dataUrl = this.fileToDataUrl(filePath)
-        if (dataUrl) {
-          return { success: true, localPath: dataUrl }
-        }
+        return { success: true, localPath: filePath }
       }
     }
 
@@ -1895,10 +2718,7 @@ class ChatService {
 
       if (localPath) {
         emojiCache.set(cacheKey, localPath)
-        const dataUrl = this.fileToDataUrl(localPath)
-        if (dataUrl) {
-          return { success: true, localPath: dataUrl }
-        }
+        return { success: true, localPath }
       }
       return { success: false, error: '下载失败' }
     } catch (e) {
@@ -2204,7 +3024,7 @@ class ChatService {
   /**
    * getVoiceData (绕过WCDB的buggy getVoiceData，直接用execQuery读取)
    */
-  async getVoiceData(sessionId: string, msgId: string, createTime?: number, serverId?: string | number): Promise<{ success: boolean; data?: string; error?: string }> {
+  async getVoiceData(sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxidOpt?: string): Promise<{ success: boolean; data?: string; error?: string }> {
     const startTime = Date.now()
     try {
       const localId = parseInt(msgId, 10)
@@ -2213,14 +3033,14 @@ class ChatService {
       }
 
       let msgCreateTime = createTime
-      let senderWxid: string | null = null
+      let senderWxid: string | null = senderWxidOpt || null
 
       // 如果前端没传 createTime，才需要查询消息（这个很慢）
       if (!msgCreateTime) {
         const t1 = Date.now()
         const msgResult = await this.getMessageByLocalId(sessionId, localId)
         const t2 = Date.now()
-        console.log(`[Voice] getMessageByLocalId: ${t2 - t1}ms`)
+
 
         if (msgResult.success && msgResult.message) {
           const msg = msgResult.message as any
@@ -2239,7 +3059,7 @@ class ChatService {
       // 检查 WAV 内存缓存
       const wavCache = this.voiceWavCache.get(cacheKey)
       if (wavCache) {
-        console.log(`[Voice] 内存缓存命中，总耗时: ${Date.now() - startTime}ms`)
+
         return { success: true, data: wavCache.toString('base64') }
       }
 
@@ -2251,7 +3071,7 @@ class ChatService {
           const wavData = readFileSync(wavFilePath)
           // 同时缓存到内存
           this.cacheVoiceWav(cacheKey, wavData)
-          console.log(`[Voice] 文件缓存命中，总耗时: ${Date.now() - startTime}ms`)
+
           return { success: true, data: wavData.toString('base64') }
         } catch (e) {
           console.error('[Voice] 读取缓存文件失败:', e)
@@ -2281,17 +3101,17 @@ class ChatService {
       // 从数据库读取 silk 数据
       const silkData = await this.getVoiceDataFromMediaDb(msgCreateTime, candidates)
       const t4 = Date.now()
-      console.log(`[Voice] getVoiceDataFromMediaDb: ${t4 - t3}ms`)
+
 
       if (!silkData) {
-        return { success: false, error: '未找到语音数据' }
+        return { success: false, error: '未找到语音数据 (请确保已在微信中播放过该语音)' }
       }
 
       const t5 = Date.now()
       // 使用 silk-wasm 解码
       const pcmData = await this.decodeSilkToPcm(silkData, 24000)
       const t6 = Date.now()
-      console.log(`[Voice] decodeSilkToPcm: ${t6 - t5}ms`)
+
 
       if (!pcmData) {
         return { success: false, error: 'Silk 解码失败' }
@@ -2301,7 +3121,7 @@ class ChatService {
       // PCM -> WAV
       const wavData = this.createWavBuffer(pcmData, 24000)
       const t8 = Date.now()
-      console.log(`[Voice] createWavBuffer: ${t8 - t7}ms`)
+
 
       // 缓存 WAV 数据到内存
       this.cacheVoiceWav(cacheKey, wavData)
@@ -2309,7 +3129,7 @@ class ChatService {
       // 缓存 WAV 数据到文件（异步，不阻塞返回）
       this.cacheVoiceWavToFile(cacheKey, wavData)
 
-      console.log(`[Voice] 总耗时: ${Date.now() - startTime}ms`)
+
       return { success: true, data: wavData.toString('base64') }
     } catch (e) {
       console.error('ChatService: getVoiceData 失败:', e)
@@ -2346,17 +3166,26 @@ class ChatService {
       let mediaDbFiles: string[]
       if (this.mediaDbsCache) {
         mediaDbFiles = this.mediaDbsCache
-        console.log(`[Voice] listMediaDbs (缓存): 0ms`)
+
       } else {
         const mediaDbsResult = await wcdbService.listMediaDbs()
         const t2 = Date.now()
-        console.log(`[Voice] listMediaDbs: ${t2 - t1}ms`)
 
-        if (!mediaDbsResult.success || !mediaDbsResult.data || mediaDbsResult.data.length === 0) {
+
+        let files = mediaDbsResult.success && mediaDbsResult.data ? (mediaDbsResult.data as string[]) : []
+
+        // Fallback: 如果 WCDB DLL 没找到，手动查找
+        if (files.length === 0) {
+          console.warn('[Voice] listMediaDbs returned empty, trying manual search')
+          files = await this.findMediaDbsManually()
+        }
+
+        if (files.length === 0) {
+          console.error('[Voice] No media DBs found')
           return null
         }
 
-        mediaDbFiles = mediaDbsResult.data as string[]
+        mediaDbFiles = files
         this.mediaDbsCache = mediaDbFiles // 永久缓存
       }
 
@@ -2373,7 +3202,7 @@ class ChatService {
               "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'VoiceInfo%'"
             )
             const t4 = Date.now()
-            console.log(`[Voice] 查询VoiceInfo表: ${t4 - t3}ms`)
+
 
             if (!tablesResult.success || !tablesResult.rows || tablesResult.rows.length === 0) {
               continue
@@ -2386,7 +3215,7 @@ class ChatService {
               `PRAGMA table_info('${voiceTable}')`
             )
             const t6 = Date.now()
-            console.log(`[Voice] 查询表结构: ${t6 - t5}ms`)
+
 
             if (!columnsResult.success || !columnsResult.rows) {
               continue
@@ -2423,7 +3252,7 @@ class ChatService {
               "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Name2Id%'"
             )
             const t8 = Date.now()
-            console.log(`[Voice] 查询Name2Id表: ${t8 - t7}ms`)
+
 
             const name2IdTable = (name2IdTablesResult.success && name2IdTablesResult.rows && name2IdTablesResult.rows.length > 0)
               ? name2IdTablesResult.rows[0].name
@@ -2450,7 +3279,7 @@ class ChatService {
               `SELECT user_name, rowid FROM ${schema.name2IdTable} WHERE user_name IN (${candidatesStr})`
             )
             const t10 = Date.now()
-            console.log(`[Voice] 查询chat_name_id: ${t10 - t9}ms`)
+
 
             if (name2IdResult.success && name2IdResult.rows && name2IdResult.rows.length > 0) {
               // 构建 chat_name_id 列表
@@ -2463,13 +3292,13 @@ class ChatService {
                 `SELECT ${schema.dataColumn} AS data FROM ${schema.voiceTable} WHERE ${schema.chatNameIdColumn} IN (${chatNameIdsStr}) AND ${schema.timeColumn} = ${createTime} LIMIT 1`
               )
               const t12 = Date.now()
-              console.log(`[Voice] 策略1查询语音: ${t12 - t11}ms`)
+
 
               if (voiceResult.success && voiceResult.rows && voiceResult.rows.length > 0) {
                 const row = voiceResult.rows[0]
                 const silkData = this.decodeVoiceBlob(row.data)
                 if (silkData) {
-                  console.log(`[Voice] getVoiceDataFromMediaDb总耗时: ${Date.now() - startTime}ms`)
+
                   return silkData
                 }
               }
@@ -2483,13 +3312,13 @@ class ChatService {
               `SELECT ${schema.dataColumn} AS data FROM ${schema.voiceTable} WHERE ${schema.timeColumn} = ${createTime} LIMIT 1`
             )
             const t14 = Date.now()
-            console.log(`[Voice] 策略2查询语音: ${t14 - t13}ms`)
+
 
             if (voiceResult.success && voiceResult.rows && voiceResult.rows.length > 0) {
               const row = voiceResult.rows[0]
               const silkData = this.decodeVoiceBlob(row.data)
               if (silkData) {
-                console.log(`[Voice] getVoiceDataFromMediaDb总耗时: ${Date.now() - startTime}ms`)
+
                 return silkData
               }
             }
@@ -2502,13 +3331,13 @@ class ChatService {
               `SELECT ${schema.dataColumn} AS data FROM ${schema.voiceTable} WHERE ${schema.timeColumn} BETWEEN ${createTime - 5} AND ${createTime + 5} ORDER BY ABS(${schema.timeColumn} - ${createTime}) LIMIT 1`
             )
             const t16 = Date.now()
-            console.log(`[Voice] 策略3查询语音: ${t16 - t15}ms`)
+
 
             if (voiceResult.success && voiceResult.rows && voiceResult.rows.length > 0) {
               const row = voiceResult.rows[0]
               const silkData = this.decodeVoiceBlob(row.data)
               if (silkData) {
-                console.log(`[Voice] getVoiceDataFromMediaDb总耗时: ${Date.now() - startTime}ms`)
+
                 return silkData
               }
             }
@@ -2735,10 +3564,13 @@ class ChatService {
     sessionId: string,
     msgId: string,
     createTime?: number,
-    onPartial?: (text: string) => void
+    onPartial?: (text: string) => void,
+    senderWxid?: string
   ): Promise<{ success: boolean; transcript?: string; error?: string }> {
     const startTime = Date.now()
-    console.log(`[Transcribe] 开始转写: sessionId=${sessionId}, msgId=${msgId}, createTime=${createTime}`)
+
+    // 确保磁盘缓存已加载
+    this.loadTranscriptCacheIfNeeded()
 
     try {
       let msgCreateTime = createTime
@@ -2749,12 +3581,12 @@ class ChatService {
         const t1 = Date.now()
         const msgResult = await this.getMessageById(sessionId, parseInt(msgId, 10))
         const t2 = Date.now()
-        console.log(`[Transcribe] getMessageById: ${t2 - t1}ms`)
+
 
         if (msgResult.success && msgResult.message) {
           msgCreateTime = msgResult.message.createTime
           serverId = msgResult.message.serverId
-          console.log(`[Transcribe] 获取到 createTime=${msgCreateTime}, serverId=${serverId}`)
+
         }
       }
 
@@ -2765,19 +3597,19 @@ class ChatService {
 
       // 使用正确的 cacheKey（包含 createTime）
       const cacheKey = this.getVoiceCacheKey(sessionId, msgId, msgCreateTime)
-      console.log(`[Transcribe] cacheKey=${cacheKey}`)
+
 
       // 检查转写缓存
       const cached = this.voiceTranscriptCache.get(cacheKey)
       if (cached) {
-        console.log(`[Transcribe] 缓存命中，总耗时: ${Date.now() - startTime}ms`)
+
         return { success: true, transcript: cached }
       }
 
       // 检查是否正在转写
       const pending = this.voiceTranscriptPending.get(cacheKey)
       if (pending) {
-        console.log(`[Transcribe] 正在转写中，等待结果`)
+
         return pending
       }
 
@@ -2786,7 +3618,7 @@ class ChatService {
           // 检查内存中是否有 WAV 数据
           let wavData = this.voiceWavCache.get(cacheKey)
           if (wavData) {
-            console.log(`[Transcribe] WAV内存缓存命中，大小: ${wavData.length} bytes`)
+
           } else {
             // 检查文件缓存
             const voiceCacheDir = this.getVoiceCacheDir()
@@ -2794,7 +3626,7 @@ class ChatService {
             if (existsSync(wavFilePath)) {
               try {
                 wavData = readFileSync(wavFilePath)
-                console.log(`[Transcribe] WAV文件缓存命中，大小: ${wavData.length} bytes`)
+
                 // 同时缓存到内存
                 this.cacheVoiceWav(cacheKey, wavData)
               } catch (e) {
@@ -2804,39 +3636,39 @@ class ChatService {
           }
 
           if (!wavData) {
-            console.log(`[Transcribe] WAV缓存未命中，调用 getVoiceData`)
+
             const t3 = Date.now()
             // 调用 getVoiceData 获取并解码
-            const voiceResult = await this.getVoiceData(sessionId, msgId, msgCreateTime, serverId)
+            const voiceResult = await this.getVoiceData(sessionId, msgId, msgCreateTime, serverId, senderWxid)
             const t4 = Date.now()
-            console.log(`[Transcribe] getVoiceData: ${t4 - t3}ms, success=${voiceResult.success}`)
+
 
             if (!voiceResult.success || !voiceResult.data) {
               console.error(`[Transcribe] 语音解码失败: ${voiceResult.error}`)
               return { success: false, error: voiceResult.error || '语音解码失败' }
             }
             wavData = Buffer.from(voiceResult.data, 'base64')
-            console.log(`[Transcribe] WAV数据大小: ${wavData.length} bytes`)
+
           }
 
           // 转写
-          console.log(`[Transcribe] 开始调用 transcribeWavBuffer`)
+
           const t5 = Date.now()
           const result = await voiceTranscribeService.transcribeWavBuffer(wavData, (text) => {
-            console.log(`[Transcribe] 部分结果: ${text}`)
+
             onPartial?.(text)
           })
           const t6 = Date.now()
-          console.log(`[Transcribe] transcribeWavBuffer: ${t6 - t5}ms, success=${result.success}`)
+
 
           if (result.success && result.transcript) {
-            console.log(`[Transcribe] 转写成功: ${result.transcript}`)
+
             this.cacheVoiceTranscript(cacheKey, result.transcript)
           } else {
             console.error(`[Transcribe] 转写失败: ${result.error}`)
           }
 
-          console.log(`[Transcribe] 总耗时: ${Date.now() - startTime}ms`)
+
           return result
         } catch (error) {
           console.error(`[Transcribe] 异常:`, error)
@@ -2866,35 +3698,196 @@ class ChatService {
 
   private cacheVoiceWav(cacheKey: string, wavData: Buffer): void {
     this.voiceWavCache.set(cacheKey, wavData)
-    if (this.voiceWavCache.size > this.voiceCacheMaxEntries) {
+    if (this.voiceWavCache.size > this.voiceWavCacheMaxEntries) {
       const oldestKey = this.voiceWavCache.keys().next().value
       if (oldestKey) this.voiceWavCache.delete(oldestKey)
     }
   }
 
+  /** 获取持久化转写缓存文件路径 */
+  private getTranscriptCachePath(): string {
+    const cachePath = this.configService.get('cachePath')
+    const base = cachePath || join(app.getPath('documents'), 'WeFlow')
+    return join(base, 'Voices', 'transcripts.json')
+  }
+
+  /** 首次访问时从磁盘加载转写缓存 */
+  private loadTranscriptCacheIfNeeded(): void {
+    if (this.transcriptCacheLoaded) return
+    this.transcriptCacheLoaded = true
+    try {
+      const filePath = this.getTranscriptCachePath()
+      if (existsSync(filePath)) {
+        const raw = readFileSync(filePath, 'utf-8')
+        const data = JSON.parse(raw) as Record<string, string>
+        for (const [k, v] of Object.entries(data)) {
+          if (typeof v === 'string') this.voiceTranscriptCache.set(k, v)
+        }
+        console.log(`[Transcribe] 从磁盘加载了 ${this.voiceTranscriptCache.size} 条转写缓存`)
+      }
+    } catch (e) {
+      console.error('[Transcribe] 加载转写缓存失败:', e)
+    }
+  }
+
+  /** 将转写缓存持久化到磁盘（防抖 3 秒） */
+  private scheduleTranscriptFlush(): void {
+    if (this.transcriptFlushTimer) return
+    this.transcriptFlushTimer = setTimeout(() => {
+      this.transcriptFlushTimer = null
+      this.flushTranscriptCache()
+    }, 3000)
+  }
+
+  /** 立即写入转写缓存到磁盘 */
+  flushTranscriptCache(): void {
+    if (!this.transcriptCacheDirty) return
+    try {
+      const filePath = this.getTranscriptCachePath()
+      const dir = dirname(filePath)
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      const obj: Record<string, string> = {}
+      for (const [k, v] of this.voiceTranscriptCache) obj[k] = v
+      writeFileSync(filePath, JSON.stringify(obj), 'utf-8')
+      this.transcriptCacheDirty = false
+    } catch (e) {
+      console.error('[Transcribe] 写入转写缓存失败:', e)
+    }
+  }
+
   private cacheVoiceTranscript(cacheKey: string, transcript: string): void {
     this.voiceTranscriptCache.set(cacheKey, transcript)
-    if (this.voiceTranscriptCache.size > this.voiceCacheMaxEntries) {
-      const oldestKey = this.voiceTranscriptCache.keys().next().value
-      if (oldestKey) this.voiceTranscriptCache.delete(oldestKey)
+    this.transcriptCacheDirty = true
+    this.scheduleTranscriptFlush()
+  }
+
+  /**
+   * 检查某个语音消息是否已有缓存的转写结果
+   */
+  hasTranscriptCache(sessionId: string, msgId: string, createTime?: number): boolean {
+    this.loadTranscriptCacheIfNeeded()
+    const cacheKey = this.getVoiceCacheKey(sessionId, msgId, createTime)
+    return this.voiceTranscriptCache.has(cacheKey)
+  }
+
+  /**
+   * 获取某会话的所有语音消息（localType=34），用于批量转写
+   */
+  async getAllVoiceMessages(sessionId: string): Promise<{ success: boolean; messages?: Message[]; error?: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) {
+        return { success: false, error: connectResult.error || '数据库未连接' }
+      }
+
+      // 获取会话表信息
+      let tables = this.sessionTablesCache.get(sessionId)
+      if (!tables) {
+        const tableStats = await wcdbService.getMessageTableStats(sessionId)
+        if (!tableStats.success || !tableStats.tables || tableStats.tables.length === 0) {
+          return { success: false, error: '未找到会话消息表' }
+        }
+        tables = tableStats.tables
+          .map(t => ({ tableName: t.table_name || t.name, dbPath: t.db_path }))
+          .filter(t => t.tableName && t.dbPath) as Array<{ tableName: string; dbPath: string }>
+        if (tables.length > 0) {
+          this.sessionTablesCache.set(sessionId, tables)
+          setTimeout(() => { this.sessionTablesCache.delete(sessionId) }, this.sessionTablesCacheTtl)
+        }
+      }
+
+      let allVoiceMessages: Message[] = []
+
+      for (const { tableName, dbPath } of tables) {
+        try {
+          const sql = `SELECT * FROM ${tableName} WHERE local_type = 34 ORDER BY create_time DESC`
+          const result = await wcdbService.execQuery('message', dbPath, sql)
+          if (result.success && result.rows && result.rows.length > 0) {
+            const mapped = this.mapRowsToMessages(result.rows as Record<string, any>[])
+            allVoiceMessages.push(...mapped)
+          }
+        } catch (e) {
+          console.error(`[ChatService] 查询语音消息失败 (${dbPath}):`, e)
+        }
+      }
+
+      // 按 createTime 降序排序
+      allVoiceMessages.sort((a, b) => b.createTime - a.createTime)
+
+      // 去重
+      const seen = new Set<string>()
+      allVoiceMessages = allVoiceMessages.filter(msg => {
+        const key = `${msg.serverId}-${msg.localId}-${msg.createTime}-${msg.sortSeq}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+
+      console.log(`[ChatService] 共找到 ${allVoiceMessages.length} 条语音消息（去重后）`)
+      return { success: true, messages: allVoiceMessages }
+    } catch (e) {
+      console.error('[ChatService] 获取所有语音消息失败:', e)
+      return { success: false, error: String(e) }
+    }
+  }
+
+  /**
+   * 获取某会话中有消息的日期列表
+   * 返回 YYYY-MM-DD 格式的日期字符串数组
+   */
+  async getMessageDates(sessionId: string): Promise<{ success: boolean; dates?: string[]; error?: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) {
+        return { success: false, error: connectResult.error || '数据库未连接' }
+      }
+
+      const result = await wcdbService.getMessageDates(sessionId)
+      if (!result.success) {
+        throw new Error(result.error || '查询失败')
+      }
+
+      const dates = result.dates || []
+
+      console.log(`[ChatService] 会话 ${sessionId} 共有 ${dates.length} 个有消息的日期`)
+      return { success: true, dates }
+    } catch (e) {
+      console.error('[ChatService] 获取消息日期失败:', e)
+      return { success: false, error: String(e) }
     }
   }
 
   async getMessageById(sessionId: string, localId: number): Promise<{ success: boolean; message?: Message; error?: string }> {
     try {
-      // 1. 获取该会话所在的消息表
-      // 注意：这里使用 getMessageTableStats 而不是 getMessageTables，因为前者包含 db_path
-      const tableStats = await wcdbService.getMessageTableStats(sessionId)
-      if (!tableStats.success || !tableStats.tables || tableStats.tables.length === 0) {
-        return { success: false, error: '未找到会话消息表' }
+      // 1. 尝试从缓存获取会话表信息
+      let tables = this.sessionTablesCache.get(sessionId)
+
+      if (!tables) {
+        // 缓存未命中，查询数据库
+        const tableStats = await wcdbService.getMessageTableStats(sessionId)
+        if (!tableStats.success || !tableStats.tables || tableStats.tables.length === 0) {
+          return { success: false, error: '未找到会话消息表' }
+        }
+
+        // 提取表信息并缓存
+        tables = tableStats.tables
+          .map(t => ({
+            tableName: t.table_name || t.name,
+            dbPath: t.db_path
+          }))
+          .filter(t => t.tableName && t.dbPath) as Array<{ tableName: string; dbPath: string }>
+
+        if (tables.length > 0) {
+          this.sessionTablesCache.set(sessionId, tables)
+          // 设置过期清理
+          setTimeout(() => {
+            this.sessionTablesCache.delete(sessionId)
+          }, this.sessionTablesCacheTtl)
+        }
       }
 
       // 2. 遍历表查找消息 (通常只有一个主表，但可能有归档)
-      for (const tableInfo of tableStats.tables) {
-        const tableName = tableInfo.table_name || tableInfo.name
-        const dbPath = tableInfo.db_path
-        if (!tableName || !dbPath) continue
-
+      for (const { tableName, dbPath } of tables) {
         // 构造查询
         const sql = `SELECT * FROM ${tableName} WHERE local_id = ${localId} LIMIT 1`
         const result = await wcdbService.execQuery('message', dbPath, sql)
@@ -2968,6 +3961,13 @@ class ChatService {
       const imgInfo = this.parseImageInfo(rawContent)
       Object.assign(msg, imgInfo)
       msg.imageDatName = this.parseImageDatNameFromRow(row)
+    } else if (msg.localType === 47) { // Emoji
+      const emojiInfo = this.parseEmojiInfo(rawContent)
+      msg.emojiCdnUrl = emojiInfo.cdnUrl
+      msg.emojiMd5 = emojiInfo.md5
+      msg.emojiThumbUrl = emojiInfo.thumbUrl
+      msg.emojiEncryptUrl = emojiInfo.encryptUrl
+      msg.emojiAesKey = emojiInfo.aesKey
     }
 
     return msg
@@ -2979,10 +3979,26 @@ class ChatService {
 
   private resolveAccountDir(dbPath: string, wxid: string): string | null {
     const normalized = dbPath.replace(/[\\\\/]+$/, '')
+
+    // 如果 dbPath 本身指向 db_storage 目录下的文件（如某个 .db 文件）
+    // 则向上回溯到账号目录
+    if (basename(normalized).toLowerCase() === 'db_storage') {
+      return dirname(normalized)
+    }
     const dir = dirname(normalized)
-    if (basename(normalized).toLowerCase() === 'db_storage') return dir
-    if (basename(dir).toLowerCase() === 'db_storage') return dirname(dir)
-    return dir // 兜底
+    if (basename(dir).toLowerCase() === 'db_storage') {
+      return dirname(dir)
+    }
+
+    // 否则，dbPath 应该是数据库根目录（如 xwechat_files）
+    // 账号目录应该是 {dbPath}/{wxid}
+    const accountDirWithWxid = join(normalized, wxid)
+    if (existsSync(accountDirWithWxid)) {
+      return accountDirWithWxid
+    }
+
+    // 兜底：返回 dbPath 本身（可能 dbPath 已经是账号目录）
+    return normalized
   }
 
   private async findDatFile(accountDir: string, baseName: string, sessionId?: string): Promise<string | null> {
@@ -3248,6 +4264,47 @@ class ChatService {
       throw new Error('十六进制字符串不能为空')
     }
     return parsed
+  }
+
+  async execQuery(kind: string, path: string | null, sql: string): Promise<{ success: boolean; rows?: any[]; error?: string }> {
+    try {
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) {
+        return { success: false, error: connectResult.error || '数据库未连接' }
+      }
+      return wcdbService.execQuery(kind, path, sql)
+    } catch (e) {
+      console.error('ChatService: 执行自定义查询失败:', e)
+      return { success: false, error: String(e) }
+    }
+  }
+
+
+  /**
+   * 下载表情包文件（用于导出，返回文件路径）
+   */
+  async downloadEmojiFile(msg: Message): Promise<string | null> {
+    if (!msg.emojiMd5) return null
+    let url = msg.emojiCdnUrl
+
+    // 尝试获取 URL
+    if (!url && msg.emojiEncryptUrl) {
+      console.warn('[ChatService] Emoji has only encryptUrl:', msg.emojiMd5)
+    }
+
+    if (!url) {
+      await this.fallbackEmoticon(msg)
+      url = msg.emojiCdnUrl
+    }
+
+    if (!url) return null
+
+    // Reuse existing downloadEmoji method
+    const result = await this.downloadEmoji(url, msg.emojiMd5)
+    if (result.success && result.localPath) {
+      return result.localPath
+    }
+    return null
   }
 }
 

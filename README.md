@@ -20,21 +20,42 @@ WeFlow 是一个**完全本地**的微信**实时**聊天记录查看、分析�
 <a href="https://github.com/hicccc77/WeFlow/issues">
 <img src="https://img.shields.io/github/issues/hicccc77/WeFlow?style=flat-square" alt="Issues">
 </a>
-<a href="https://t.me/+hn3QzNc4DbA0MzNl">
-<img src="https://img.shields.io/badge/Telegram%20交流群-点击加入-0088cc?style=flat-square&logo=telegram&logoColor=0088cc&labelColor=white" alt="Telegram">
+<a href="https://t.me/weflow_cc">
+<img src="https://img.shields.io/badge/Telegram%20频道-0088cc?style=flat-square&logo=telegram&logoColor=0088cc&labelColor=white" alt="Telegram">
 </a>
 </p>
+
 
 > [!TIP]
 > 如果导出聊天记录后，想深入分析聊天内容可以试试 [ChatLab](https://chatlab.fun/)
 
+> [!NOTE]
+> 仅支持微信 **4.0 及以上**版本，确保你的微信版本符合要求
+
 ## 主要功能
 
 - 本地实时查看聊天记录
+- 朋友圈图片、视频、**实况**的预览和解密
 - 统计分析与群聊画像
 - 年度报告与可视化概览
 - 导出聊天记录为 HTML 等格式
-- 本地解密与数据库管理
+- HTTP API 接口（供开发者集成）
+
+
+## HTTP API
+
+> [!WARNING]
+> 此功能目前处于早期阶段，接口可能会有变动，请等待后续更新完善。
+
+WeFlow 提供本地 HTTP API 服务，支持通过接口查询消息数据，可用于与其他工具集成或二次开发。
+
+- **启用方式**：设置 → API 服务 → 启动服务
+- **默认端口**：5031
+- **访问地址**：`http://127.0.0.1:5031`
+- **支持格式**：原始 JSON 或 [ChatLab](https://chatlab.fun/) 标准格式
+
+📖 完整接口文档：[点击查看](docs/HTTP-API.md)
+
 
 ## 快速开始
 
@@ -61,38 +82,19 @@ npm run build
 
 打包产物在 `release` 目录下。
 
-## 技术栈
 
-- **前端**: React 19 + TypeScript + Zustand
-- **桌面**: Electron 39
-- **构建**: Vite + electron-builder
-- **数据库**: better-sqlite3 + WCDB DLL
-- **样式**: SCSS + CSS Variables
-
-## 项目结构
-
-```
-WeFlow/
-├── electron/              # Electron 主进程
-│   ├── main.ts           # 主进程入口
-│   ├── preload.ts        # 预加载脚本
-│   └── services/         # 后端服务
-│       ├── chatService.ts      # 聊天数据服务
-│       ├── wcdbService.ts      # 数据库服务
-│       └── ...
-├── src/                   # React 前端
-│   ├── components/       # 通用组件
-│   ├── pages/            # 页面组件
-│   ├── stores/           # Zustand 状态管理
-│   ├── services/         # 前端服务
-│   └── types/            # TypeScript 类型定义
-├── public/               # 静态资源
-└── resources/            # 打包资源
-```
 
 ## 致谢
 
 - [密语 CipherTalk](https://github.com/ILoveBingLu/miyu) 为本项目提供了基础框架
+- [WeChat-Channels-Video-File-Decryption](https://github.com/Evil0ctal/WeChat-Channels-Video-File-Decryption) 提供了视频解密相关的技术参考
+
+## 支持我们
+
+如果 WeFlow 确实帮到了你，可以考虑请我们喝杯咖啡：
+
+
+> TRC20  **Address:** `TZCtAw8CaeARWZBfvjidCnTcfnAtf6nvS6`
 
 
 ## Star History
@@ -110,7 +112,5 @@ WeFlow/
 ---
 
 **请负责任地使用本工具，遵守相关法律法规**
-
-我们总是在向前走，却很少有机会回头看看
 
 </div>

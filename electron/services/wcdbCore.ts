@@ -1,6 +1,12 @@
 import { join, dirname, basename } from 'path'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
 
+// DLL 初始化错误信息，用于帮助用户诊断问题
+let lastDllInitError: string | null = null
+export function getLastDllInitError(): string | null {
+  return lastDllInitError
+}
+
 export class WcdbCore {
   private resourcesPath: string | null = null
   private userDataPath: string | null = null
@@ -14,12 +20,15 @@ export class WcdbCore {
   private currentWxid: string | null = null
 
   // 函数引用
+  private wcdbInitProtection: any = null
   private wcdbInit: any = null
   private wcdbShutdown: any = null
   private wcdbOpenAccount: any = null
   private wcdbCloseAccount: any = null
   private wcdbSetMyWxid: any = null
   private wcdbFreeString: any = null
+  private wcdbUpdateMessage: any = null
+  private wcdbDeleteMessage: any = null
   private wcdbGetSessions: any = null
   private wcdbGetMessages: any = null
   private wcdbGetMessageCount: any = null
@@ -28,6 +37,7 @@ export class WcdbCore {
   private wcdbGetGroupMemberCount: any = null
   private wcdbGetGroupMemberCounts: any = null
   private wcdbGetGroupMembers: any = null
+  private wcdbGetGroupNicknames: any = null
   private wcdbGetMessageTables: any = null
   private wcdbGetMessageMeta: any = null
   private wcdbGetContact: any = null
@@ -36,7 +46,9 @@ export class WcdbCore {
   private wcdbGetAvailableYears: any = null
   private wcdbGetAnnualReportStats: any = null
   private wcdbGetAnnualReportExtras: any = null
+  private wcdbGetDualReportStats: any = null
   private wcdbGetGroupStats: any = null
+  private wcdbGetMessageDates: any = null
   private wcdbOpenMessageCursor: any = null
   private wcdbOpenMessageCursorLite: any = null
   private wcdbFetchMessageBatch: any = null
@@ -49,6 +61,15 @@ export class WcdbCore {
   private wcdbGetEmoticonCdnUrl: any = null
   private wcdbGetDbStatus: any = null
   private wcdbGetVoiceData: any = null
+  private wcdbGetSnsTimeline: any = null
+  private wcdbGetSnsAnnualStats: any = null
+  private wcdbVerifyUser: any = null
+  private wcdbStartMonitorPipe: any = null
+  private wcdbStopMonitorPipe: any = null
+
+  private monitorPipeClient: any = null
+
+
   private avatarUrlCache: Map<string, { url?: string; updatedAt: number }> = new Map()
   private readonly avatarCacheTtlMs = 10 * 60 * 1000
   private logTimer: NodeJS.Timeout | null = null
@@ -67,6 +88,82 @@ export class WcdbCore {
       this.stopLogPolling()
     }
   }
+
+  // 使用命名管道 IPC
+  startMonitor(callback: (type: string, json: string) => void): boolean {
+    if (!this.wcdbStartMonitorPipe) {
+      this.writeLog('startMonitor: wcdbStartMonitorPipe not available')
+      return false
+    }
+
+    try {
+      const result = this.wcdbStartMonitorPipe()
+      if (result !== 0) {
+        this.writeLog(`startMonitor: wcdbStartMonitorPipe failed with ${result}`)
+        return false
+      }
+
+      const net = require('net')
+      const PIPE_PATH = '\\\\.\\pipe\\weflow_monitor'
+
+      setTimeout(() => {
+        this.monitorPipeClient = net.createConnection(PIPE_PATH, () => {
+          this.writeLog('Monitor pipe connected')
+        })
+
+        let buffer = ''
+        this.monitorPipeClient.on('data', (data: Buffer) => {
+          buffer += data.toString('utf8')
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+          for (const line of lines) {
+            if (line.trim()) {
+              try {
+                const parsed = JSON.parse(line)
+                callback(parsed.action || 'update', line)
+              } catch {
+                callback('update', line)
+              }
+            }
+          }
+        })
+
+        this.monitorPipeClient.on('error', (err: Error) => {
+          this.writeLog(`Monitor pipe error: ${err.message}`)
+        })
+
+        this.monitorPipeClient.on('close', () => {
+          this.writeLog('Monitor pipe closed')
+          this.monitorPipeClient = null
+        })
+      }, 100)
+
+      this.writeLog('Monitor started via named pipe IPC')
+      return true
+    } catch (e) {
+      console.error('打开数据库异常:', e)
+      return false
+    }
+  }
+
+
+
+  stopMonitor(): void {
+    if (this.monitorPipeClient) {
+      this.monitorPipeClient.destroy()
+      this.monitorPipeClient = null
+    }
+    if (this.wcdbStopMonitorPipe) {
+      this.wcdbStopMonitorPipe()
+    }
+  }
+
+  // 保留旧方法签名以兼容
+  setMonitor(callback: (type: string, json: string) => void): boolean {
+    return this.startMonitor(callback)
+  }
+
+
 
   /**
    * 获取 DLL 路径
@@ -102,7 +199,7 @@ export class WcdbCore {
   }
 
   private isLogEnabled(): boolean {
-    if (process.env.WEFLOW_WORKER === '1') return false
+    // 移除 Worker 线程的日志禁用逻辑，允许在 Worker 中记录日志
     if (process.env.WCDB_LOG_ENABLED === '1') return true
     return this.logEnabled
   }
@@ -110,7 +207,8 @@ export class WcdbCore {
   private writeLog(message: string, force = false): void {
     if (!force && !this.isLogEnabled()) return
     const line = `[${new Date().toISOString()}] ${message}`
-    // 移除控制台日志，只写入文件
+    // 同时输出到控制台和文件
+
     try {
       const base = this.userDataPath || process.env.WCDB_LOG_DIR || process.cwd()
       const dir = join(base, 'logs')
@@ -208,7 +306,64 @@ export class WcdbCore {
         return false
       }
 
+      const dllDir = dirname(dllPath)
+      const wcdbCorePath = join(dllDir, 'WCDB.dll')
+      if (existsSync(wcdbCorePath)) {
+        try {
+          this.koffi.load(wcdbCorePath)
+          this.writeLog('预加载 WCDB.dll 成功')
+        } catch (e) {
+          console.warn('预加载 WCDB.dll 失败(可能不是致命的):', e)
+          this.writeLog(`预加载 WCDB.dll 失败: ${String(e)}`)
+        }
+      }
+      const sdl2Path = join(dllDir, 'SDL2.dll')
+      if (existsSync(sdl2Path)) {
+        try {
+          this.koffi.load(sdl2Path)
+          this.writeLog('预加载 SDL2.dll 成功')
+        } catch (e) {
+          console.warn('预加载 SDL2.dll 失败(可能不是致命的):', e)
+          this.writeLog(`预加载 SDL2.dll 失败: ${String(e)}`)
+        }
+      }
+
       this.lib = this.koffi.load(dllPath)
+
+      // InitProtection (Added for security)
+      try {
+        this.wcdbInitProtection = this.lib.func('bool InitProtection(const char* resourcePath)')
+
+        // 尝试多个可能的资源路径
+        const resourcePaths = [
+          dllDir,  // DLL 所在目录
+          dirname(dllDir),  // 上级目录
+          this.resourcesPath,  // 配置的资源路径
+          join(process.cwd(), 'resources')  // 开发环境
+        ].filter(Boolean)
+
+        let protectionOk = false
+        for (const resPath of resourcePaths) {
+          try {
+            // 
+            protectionOk = this.wcdbInitProtection(resPath)
+            if (protectionOk) {
+              // 
+              break
+            }
+          } catch (e) {
+            // console.warn(`[WCDB] InitProtection 失败 (${resPath}):`, e)
+          }
+        }
+
+        if (!protectionOk) {
+          // console.warn('[WCDB] Core security check failed - 继续运行但可能不稳定')
+          // this.writeLog('InitProtection 失败，继续运行')
+          // 不返回 false，允许继续运行
+        }
+      } catch (e) {
+        // console.warn('InitProtection symbol not found:', e)
+      }
 
       // 定义类型
       // wcdb_status wcdb_init()
@@ -230,6 +385,20 @@ export class WcdbCore {
         this.wcdbSetMyWxid = this.lib.func('int32 wcdb_set_my_wxid(int64 handle, const char* wxid)')
       } catch {
         this.wcdbSetMyWxid = null
+      }
+
+      // wcdb_status wcdb_update_message(wcdb_handle handle, const char* session_id, int64_t local_id, int32_t create_time, const char* new_content, char** out_error)
+      try {
+        this.wcdbUpdateMessage = this.lib.func('int32 wcdb_update_message(int64 handle, const char* sessionId, int64 localId, int32 createTime, const char* newContent, _Out_ void** outError)')
+      } catch {
+        this.wcdbUpdateMessage = null
+      }
+
+      // wcdb_status wcdb_delete_message(wcdb_handle handle, const char* session_id, int64_t local_id, char** out_error)
+      try {
+        this.wcdbDeleteMessage = this.lib.func('int32 wcdb_delete_message(int64 handle, const char* sessionId, int64 localId, int32 createTime, const char* dbPathHint, _Out_ void** outError)')
+      } catch {
+        this.wcdbDeleteMessage = null
       }
 
       // void wcdb_free_string(char* ptr)
@@ -262,6 +431,13 @@ export class WcdbCore {
 
       // wcdb_status wcdb_get_group_members(wcdb_handle handle, const char* chatroom_id, char** out_json)
       this.wcdbGetGroupMembers = this.lib.func('int32 wcdb_get_group_members(int64 handle, const char* chatroomId, _Out_ void** outJson)')
+
+      // wcdb_status wcdb_get_group_nicknames(wcdb_handle handle, const char* chatroom_id, char** out_json)
+      try {
+        this.wcdbGetGroupNicknames = this.lib.func('int32 wcdb_get_group_nicknames(int64 handle, const char* chatroomId, _Out_ void** outJson)')
+      } catch {
+        this.wcdbGetGroupNicknames = null
+      }
 
       // wcdb_status wcdb_get_message_tables(wcdb_handle handle, const char* session_id, char** out_json)
       this.wcdbGetMessageTables = this.lib.func('int32 wcdb_get_message_tables(int64 handle, const char* sessionId, _Out_ void** outJson)')
@@ -299,11 +475,32 @@ export class WcdbCore {
         this.wcdbGetAnnualReportExtras = null
       }
 
+      // wcdb_status wcdb_get_dual_report_stats(wcdb_handle handle, const char* session_id, int32_t begin_timestamp, int32_t end_timestamp, char** out_json)
+      try {
+        this.wcdbGetDualReportStats = this.lib.func('int32 wcdb_get_dual_report_stats(int64 handle, const char* sessionId, int32 begin, int32 end, _Out_ void** outJson)')
+      } catch {
+        this.wcdbGetDualReportStats = null
+      }
+
+      // wcdb_status wcdb_get_logs(char** out_json)
+      try {
+        this.wcdbGetLogs = this.lib.func('int32 wcdb_get_logs(_Out_ void** outJson)')
+      } catch {
+        this.wcdbGetLogs = null
+      }
+
       // wcdb_status wcdb_get_group_stats(wcdb_handle handle, const char* chatroom_id, int32_t begin_timestamp, int32_t end_timestamp, char** out_json)
       try {
         this.wcdbGetGroupStats = this.lib.func('int32 wcdb_get_group_stats(int64 handle, const char* chatroomId, int32 begin, int32 end, _Out_ void** outJson)')
       } catch {
         this.wcdbGetGroupStats = null
+      }
+
+      // wcdb_status wcdb_get_message_dates(wcdb_handle handle, const char* session_id, char** out_json)
+      try {
+        this.wcdbGetMessageDates = this.lib.func('int32 wcdb_get_message_dates(int64 handle, const char* sessionId, _Out_ void** outJson)')
+      } catch {
+        this.wcdbGetMessageDates = null
       }
 
       // wcdb_status wcdb_open_message_cursor(wcdb_handle handle, const char* session_id, int32_t batch_size, int32_t ascending, int32_t begin_timestamp, int32_t end_timestamp, wcdb_cursor* out_cursor)
@@ -354,6 +551,40 @@ export class WcdbCore {
         this.wcdbGetVoiceData = null
       }
 
+      // wcdb_status wcdb_get_sns_timeline(wcdb_handle handle, int32_t limit, int32_t offset, const char* username, const char* keyword, int32_t start_time, int32_t end_time, char** out_json)
+      try {
+        this.wcdbGetSnsTimeline = this.lib.func('int32 wcdb_get_sns_timeline(int64 handle, int32 limit, int32 offset, const char* username, const char* keyword, int32 startTime, int32 endTime, _Out_ void** outJson)')
+      } catch {
+        this.wcdbGetSnsTimeline = null
+      }
+
+      // wcdb_status wcdb_get_sns_annual_stats(wcdb_handle handle, int32_t begin_timestamp, int32_t end_timestamp, char** out_json)
+      try {
+        this.wcdbGetSnsAnnualStats = this.lib.func('int32 wcdb_get_sns_annual_stats(int64 handle, int32 begin, int32 end, _Out_ void** outJson)')
+      } catch {
+        this.wcdbGetSnsAnnualStats = null
+      }
+
+      // Named pipe IPC for monitoring (replaces callback)
+      try {
+        this.wcdbStartMonitorPipe = this.lib.func('int32 wcdb_start_monitor_pipe()')
+        this.wcdbStopMonitorPipe = this.lib.func('void wcdb_stop_monitor_pipe()')
+        this.writeLog('Monitor pipe functions loaded')
+      } catch (e) {
+        console.warn('Failed to load monitor pipe functions:', e)
+        this.wcdbStartMonitorPipe = null
+        this.wcdbStopMonitorPipe = null
+      }
+
+      // void VerifyUser(int64_t hwnd_ptr, const char* message, char* out_result, int max_len)
+      try {
+        this.wcdbVerifyUser = this.lib.func('void VerifyUser(int64 hwnd, const char* message, _Out_ char* outResult, int maxLen)')
+      } catch {
+        this.wcdbVerifyUser = null
+      }
+
+
+
       // 初始化
       const initResult = this.wcdbInit()
       if (initResult !== 0) {
@@ -362,9 +593,20 @@ export class WcdbCore {
       }
 
       this.initialized = true
+      lastDllInitError = null
       return true
     } catch (e) {
-      console.error('WCDB 初始化异常:', e)
+      const errorMsg = e instanceof Error ? e.message : String(e)
+      console.error('WCDB 初始化异常:', errorMsg)
+      this.writeLog(`WCDB 初始化异常: ${errorMsg}`, true)
+      lastDllInitError = errorMsg
+      // 检查是否是常见的 VC++ 运行时缺失错误
+      if (errorMsg.includes('126') || errorMsg.includes('找不到指定的模块') ||
+        errorMsg.includes('The specified module could not be found')) {
+        lastDllInitError = '可能缺少 Visual C++ 运行时库。请安装 Microsoft Visual C++ Redistributable (x64)。'
+      } else if (errorMsg.includes('193') || errorMsg.includes('不是有效的 Win32 应用程序')) {
+        lastDllInitError = 'DLL 架构不匹配。请确保使用 64 位版本的应用程序。'
+      }
       return false
     }
   }
@@ -391,7 +633,9 @@ export class WcdbCore {
       if (!this.initialized) {
         const initOk = await this.initialize()
         if (!initOk) {
-          return { success: false, error: 'WCDB 初始化失败' }
+          // 返回更详细的错误信息，帮助用户诊断问题
+          const detailedError = lastDllInitError || 'WCDB 初始化失败'
+          return { success: false, error: detailedError }
         }
       }
 
@@ -734,6 +978,37 @@ export class WcdbCore {
     }
   }
 
+  /**
+   * 获取指定时间之后的新消息
+   */
+  async getNewMessages(sessionId: string, minTime: number, limit: number = 1000): Promise<{ success: boolean; messages?: any[]; error?: string }> {
+    if (!this.ensureReady()) {
+      return { success: false, error: 'WCDB 未连接' }
+    }
+    try {
+      // 1. 打开游标 (使用 Ascending=1 从指定时间往后查)
+      const openRes = await this.openMessageCursorLite(sessionId, limit, true, minTime, 0)
+      if (!openRes.success || !openRes.cursor) {
+        return { success: false, error: openRes.error }
+      }
+
+      const cursor = openRes.cursor
+      try {
+        // 2. 获取批次
+        const fetchRes = await this.fetchMessageBatch(cursor)
+        if (!fetchRes.success) {
+          return { success: false, error: fetchRes.error }
+        }
+        return { success: true, messages: fetchRes.rows }
+      } finally {
+        // 3. 关闭游标
+        await this.closeMessageCursor(cursor)
+      }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
   async getMessageCount(sessionId: string): Promise<{ success: boolean; count?: number; error?: string }> {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
@@ -905,6 +1180,28 @@ export class WcdbCore {
     }
   }
 
+  async getGroupNicknames(chatroomId: string): Promise<{ success: boolean; nicknames?: Record<string, string>; error?: string }> {
+    if (!this.ensureReady()) {
+      return { success: false, error: 'WCDB 未连接' }
+    }
+    if (!this.wcdbGetGroupNicknames) {
+      return { success: false, error: '当前 DLL 版本不支持获取群昵称接口' }
+    }
+    try {
+      const outPtr = [null as any]
+      const result = this.wcdbGetGroupNicknames(this.handle, chatroomId, outPtr)
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `获取群昵称失败: ${result}` }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: '解析群昵称失败' }
+      const nicknames = JSON.parse(jsonStr)
+      return { success: true, nicknames }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
   async getMessageTables(sessionId: string): Promise<{ success: boolean; tables?: any[]; error?: string }> {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
@@ -919,6 +1216,29 @@ export class WcdbCore {
       if (!jsonStr) return { success: false, error: '解析消息表失败' }
       const tables = JSON.parse(jsonStr)
       return { success: true, tables }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async getMessageDates(sessionId: string): Promise<{ success: boolean; dates?: string[]; error?: string }> {
+    if (!this.ensureReady()) {
+      return { success: false, error: 'WCDB 未连接' }
+    }
+    try {
+      if (!this.wcdbGetMessageDates) {
+        return { success: false, error: 'DLL 不支持 getMessageDates' }
+      }
+      const outPtr = [null as any]
+      const result = this.wcdbGetMessageDates(this.handle, sessionId, outPtr)
+      if (result !== 0 || !outPtr[0]) {
+        // 空结果也可能是正常的（无消息）
+        return { success: true, dates: [] }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: '解析日期列表失败' }
+      const dates = JSON.parse(jsonStr)
+      return { success: true, dates }
     } catch (e) {
       return { success: false, error: String(e) }
     }
@@ -1246,13 +1566,31 @@ export class WcdbCore {
     }
   }
 
+  async getLogs(): Promise<{ success: boolean; logs?: string[]; error?: string }> {
+    if (!this.lib) return { success: false, error: 'DLL 未加载' }
+    if (!this.wcdbGetLogs) return { success: false, error: '接口未就绪' }
+    try {
+      const outPtr = [null as any]
+      const result = this.wcdbGetLogs(outPtr)
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `获取日志失败: ${result}` }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: '解析日志失败' }
+      return { success: true, logs: JSON.parse(jsonStr) }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
   async execQuery(kind: string, path: string | null, sql: string): Promise<{ success: boolean; rows?: any[]; error?: string }> {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
+      if (!this.wcdbExecQuery) return { success: false, error: '接口未就绪' }
       const outPtr = [null as any]
-      const result = this.wcdbExecQuery(this.handle, kind, path, sql, outPtr)
+      const result = this.wcdbExecQuery(this.handle, kind, path || '', sql, outPtr)
       if (result !== 0 || !outPtr[0]) {
         return { success: false, error: `执行查询失败: ${result}` }
       }
@@ -1344,4 +1682,170 @@ export class WcdbCore {
       return { success: false, error: String(e) }
     }
   }
+
+  /**
+   * 验证 Windows Hello
+   */
+  async verifyUser(message: string, hwnd?: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.initialized) {
+      const initOk = await this.initialize()
+      if (!initOk) return { success: false, error: 'WCDB 初始化失败' }
+    }
+
+    if (!this.wcdbVerifyUser) {
+      return { success: false, error: 'Binding not found: VerifyUser' }
+    }
+
+    return new Promise((resolve) => {
+      try {
+        // Allocate buffer for result JSON
+        const maxLen = 1024
+        const outBuf = Buffer.alloc(maxLen)
+
+        // Call native function
+        const hwndVal = hwnd ? BigInt(hwnd) : BigInt(0)
+        this.wcdbVerifyUser(hwndVal, message || '', outBuf, maxLen)
+
+        // Parse result
+        const jsonStr = this.koffi.decode(outBuf, 'char', -1)
+        const result = JSON.parse(jsonStr)
+        resolve(result)
+      } catch (e) {
+        resolve({ success: false, error: String(e) })
+      }
+    })
+  }
+
+  async getSnsTimeline(limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number): Promise<{ success: boolean; timeline?: any[]; error?: string }> {
+    if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
+    if (!this.wcdbGetSnsTimeline) return { success: false, error: '当前 DLL 版本不支持获取朋友圈' }
+    try {
+      const outPtr = [null as any]
+      const usernamesJson = usernames && usernames.length > 0 ? JSON.stringify(usernames) : ''
+      const result = this.wcdbGetSnsTimeline(
+        this.handle,
+        limit,
+        offset,
+        usernamesJson,
+        keyword || '',
+        startTime || 0,
+        endTime || 0,
+        outPtr
+      )
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `获取朋友圈失败: ${result}` }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: '解析朋友圈数据失败' }
+      const timeline = JSON.parse(jsonStr)
+      return { success: true, timeline }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async getSnsAnnualStats(beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; data?: any; error?: string }> {
+    if (!this.ensureReady()) {
+      return { success: false, error: 'WCDB 未连接' }
+    }
+    try {
+      if (!this.wcdbGetSnsAnnualStats) {
+        return { success: false, error: 'wcdbGetSnsAnnualStats 未找到' }
+      }
+      await new Promise(resolve => setImmediate(resolve))
+      const outPtr = [null as any]
+      const result = this.wcdbGetSnsAnnualStats(this.handle, beginTimestamp, endTimestamp, outPtr)
+      await new Promise(resolve => setImmediate(resolve))
+
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `getSnsAnnualStats failed: ${result}` }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: 'Failed to decode JSON' }
+      return { success: true, data: JSON.parse(jsonStr) }
+    } catch (e) {
+      console.error('getSnsAnnualStats 异常:', e)
+      return { success: false, error: String(e) }
+    }
+  }
+  async getDualReportStats(sessionId: string, beginTimestamp: number = 0, endTimestamp: number = 0): Promise<{ success: boolean; data?: any; error?: string }> {
+    if (!this.ensureReady()) {
+      return { success: false, error: 'WCDB 未连接' }
+    }
+    if (!this.wcdbGetDualReportStats) {
+      return { success: false, error: '未支持双人报告统计' }
+    }
+    try {
+      const { begin, end } = this.normalizeRange(beginTimestamp, endTimestamp)
+      const outPtr = [null as any]
+      const result = this.wcdbGetDualReportStats(this.handle, sessionId, begin, end, outPtr)
+      if (result !== 0 || !outPtr[0]) {
+        return { success: false, error: `获取双人报告统计失败: ${result}` }
+      }
+      const jsonStr = this.decodeJsonPtr(outPtr[0])
+      if (!jsonStr) return { success: false, error: '解析双人报告统计失败' }
+      const data = JSON.parse(jsonStr)
+      return { success: true, data }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+  /**
+   * 修改消息内容
+   */
+  async updateMessage(sessionId: string, localId: number, createTime: number, newContent: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.initialized || !this.wcdbUpdateMessage) return { success: false, error: 'WCDB Not Initialized or Method Missing' }
+    if (!this.handle) return { success: false, error: 'Not Connected' }
+
+    return new Promise((resolve) => {
+      try {
+        const outError = [null as any]
+        const result = this.wcdbUpdateMessage(this.handle, sessionId, localId, createTime, newContent, outError)
+
+        if (result !== 0) {
+          let errorMsg = 'Unknown Error'
+          if (outError[0]) {
+            errorMsg = this.decodeJsonPtr(outError[0]) || 'Unknown Error (Decode Failed)'
+          }
+          resolve({ success: false, error: errorMsg })
+          return
+        }
+
+        resolve({ success: true })
+      } catch (e) {
+        resolve({ success: false, error: String(e) })
+      }
+    })
+  }
+
+  /**
+   * 删除消息
+   */
+  async deleteMessage(sessionId: string, localId: number, createTime: number, dbPathHint?: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.initialized || !this.wcdbDeleteMessage) return { success: false, error: 'WCDB Not Initialized or Method Missing' }
+    if (!this.handle) return { success: false, error: 'Not Connected' }
+
+    return new Promise((resolve) => {
+      try {
+        const outError = [null as any]
+        const result = this.wcdbDeleteMessage(this.handle, sessionId, localId, createTime || 0, dbPathHint || '', outError)
+
+        if (result !== 0) {
+          let errorMsg = 'Unknown Error'
+          if (outError[0]) {
+            errorMsg = this.decodeJsonPtr(outError[0]) || 'Unknown Error (Decode Failed)'
+          }
+          console.error(`[WcdbCore] deleteMessage fail: code=${result}, error=${errorMsg}`)
+          resolve({ success: false, error: errorMsg })
+          return
+        }
+
+        resolve({ success: true })
+      } catch (e) {
+        console.error(`[WcdbCore] deleteMessage exception:`, e)
+        resolve({ success: false, error: String(e) })
+      }
+    })
+  }
 }
+

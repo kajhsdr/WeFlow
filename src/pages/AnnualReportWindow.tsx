@@ -71,6 +71,20 @@ interface AnnualReportData {
   socialInitiative?: { initiatedChats: number; receivedChats: number; initiativeRate: number } | null
   responseSpeed?: { avgResponseTime: number; fastestFriend: string; fastestTime: number } | null
   topPhrases?: { phrase: string; count: number }[]
+  snsStats?: {
+    totalPosts: number
+    typeCounts?: Record<string, number>
+    topLikers: { username: string; displayName: string; avatarUrl?: string; count: number }[]
+    topLiked: { username: string; displayName: string; avatarUrl?: string; count: number }[]
+  }
+  lostFriend: {
+    username: string
+    displayName: string
+    avatarUrl?: string
+    earlyCount: number
+    lateCount: number
+    periodDesc: string
+  } | null
 }
 
 interface SectionInfo {
@@ -95,148 +109,8 @@ const Avatar = ({ url, name, size = 'md' }: { url?: string; name: string; size?:
   )
 }
 
-// 热力图组件
-const Heatmap = ({ data }: { data: number[][] }) => {
-  const maxHeat = Math.max(...data.flat())
-  const weekLabels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-
-  return (
-    <div className="heatmap-wrapper">
-      <div className="heatmap-header">
-        <div></div>
-        <div className="time-labels">
-          {[0, 6, 12, 18].map(h => (
-            <span key={h} style={{ gridColumn: h + 1 }}>{h}</span>
-          ))}
-        </div>
-      </div>
-      <div className="heatmap">
-        <div className="heatmap-week-col">
-          {weekLabels.map(w => <div key={w} className="week-label">{w}</div>)}
-        </div>
-        <div className="heatmap-grid">
-          {data.map((row, wi) =>
-            row.map((val, hi) => {
-              const alpha = maxHeat > 0 ? (val / maxHeat * 0.85 + 0.1).toFixed(2) : '0.1'
-              return (
-                <div
-                  key={`${wi}-${hi}`}
-                  className="h-cell"
-                  style={{ background: `rgba(7, 193, 96, ${alpha})` }}
-                  title={`${weekLabels[wi]} ${hi}:00 - ${val}条`}
-                />
-              )
-            })
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// 词云组件
-const WordCloud = ({ words }: { words: { phrase: string; count: number }[] }) => {
-  const maxCount = words.length > 0 ? words[0].count : 1
-  const topWords = words.slice(0, 32)
-  const baseSize = 520
-
-  // 使用确定性随机数生成器
-  const seededRandom = (seed: number) => {
-    const x = Math.sin(seed) * 10000
-    return x - Math.floor(x)
-  }
-
-  // 计算词云位置
-  const placedItems: { x: number; y: number; w: number; h: number }[] = []
-
-  const canPlace = (x: number, y: number, w: number, h: number): boolean => {
-    const halfW = w / 2
-    const halfH = h / 2
-    const dx = x - 50
-    const dy = y - 50
-    const dist = Math.sqrt(dx * dx + dy * dy)
-    const maxR = 49 - Math.max(halfW, halfH)
-    if (dist > maxR) return false
-
-    const pad = 1.8
-    for (const p of placedItems) {
-      if ((x - halfW - pad) < (p.x + p.w / 2) &&
-        (x + halfW + pad) > (p.x - p.w / 2) &&
-        (y - halfH - pad) < (p.y + p.h / 2) &&
-        (y + halfH + pad) > (p.y - p.h / 2)) {
-        return false
-      }
-    }
-    return true
-  }
-
-  const wordItems = topWords.map((item, i) => {
-    const ratio = item.count / maxCount
-    const fontSize = Math.round(12 + Math.pow(ratio, 0.65) * 20)
-    const opacity = Math.min(1, Math.max(0.35, 0.35 + ratio * 0.65))
-    const delay = (i * 0.04).toFixed(2)
-
-    // 计算词语宽度
-    const charCount = Math.max(1, item.phrase.length)
-    const hasCjk = /[\u4e00-\u9fff]/.test(item.phrase)
-    const hasLatin = /[A-Za-z0-9]/.test(item.phrase)
-    const widthFactor = hasCjk && hasLatin ? 0.85 : hasCjk ? 0.98 : 0.6
-    const widthPx = fontSize * (charCount * widthFactor)
-    const heightPx = fontSize * 1.1
-    const widthPct = (widthPx / baseSize) * 100
-    const heightPct = (heightPx / baseSize) * 100
-
-    // 寻找位置
-    let x = 50, y = 50
-    let placedOk = false
-    const tries = i === 0 ? 1 : 420
-
-    for (let t = 0; t < tries; t++) {
-      if (i === 0) {
-        x = 50
-        y = 50
-      } else {
-        const idx = i + t * 0.28
-        const radius = Math.sqrt(idx) * 7.6 + (seededRandom(i * 1000 + t) * 1.2 - 0.6)
-        const angle = idx * 2.399963 + seededRandom(i * 2000 + t) * 0.35
-        x = 50 + radius * Math.cos(angle)
-        y = 50 + radius * Math.sin(angle)
-      }
-      if (canPlace(x, y, widthPct, heightPct)) {
-        placedOk = true
-        break
-      }
-    }
-
-    if (!placedOk) return null
-    placedItems.push({ x, y, w: widthPct, h: heightPct })
-
-    return (
-      <span
-        key={i}
-        className="word-tag"
-        style={{
-          '--final-opacity': opacity,
-          left: `${x.toFixed(2)}%`,
-          top: `${y.toFixed(2)}%`,
-          fontSize: `${fontSize}px`,
-          animationDelay: `${delay}s`,
-        } as React.CSSProperties}
-        title={`${item.phrase} (出现 ${item.count} 次)`}
-      >
-        {item.phrase}
-      </span>
-    )
-  }).filter(Boolean)
-
-  return (
-    <div className="word-cloud-wrapper">
-      <div className="word-cloud-inner">
-        {wordItems}
-      </div>
-    </div>
-  )
-}
+import Heatmap from '../components/ReportHeatmap'
+import WordCloud from '../components/ReportWordCloud'
 
 function AnnualReportWindow() {
   const [reportData, setReportData] = useState<AnnualReportData | null>(null)
@@ -274,6 +148,8 @@ function AnnualReportWindow() {
     responseSpeed: useRef<HTMLElement>(null),
     topPhrases: useRef<HTMLElement>(null),
     ranking: useRef<HTMLElement>(null),
+    sns: useRef<HTMLElement>(null),
+    lostFriend: useRef<HTMLElement>(null),
     ending: useRef<HTMLElement>(null),
   }
 
@@ -282,7 +158,8 @@ function AnnualReportWindow() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.hash.split('?')[1] || '')
     const yearParam = params.get('year')
-    const year = yearParam ? parseInt(yearParam) : new Date().getFullYear()
+    const parsedYear = yearParam ? parseInt(yearParam, 10) : new Date().getFullYear()
+    const year = Number.isNaN(parsedYear) ? new Date().getFullYear() : parsedYear
     generateReport(year)
   }, [])
 
@@ -337,6 +214,11 @@ function AnnualReportWindow() {
     return `${Math.round(seconds / 3600)}小时`
   }
 
+  const formatYearLabel = (value: number, withSuffix: boolean = true) => {
+    if (value === 0) return '历史以来'
+    return withSuffix ? `${value}年` : `${value}`
+  }
+
   // 获取可用的板块列表
   const getAvailableSections = (): SectionInfo[] => {
     if (!reportData) return []
@@ -367,10 +249,16 @@ function AnnualReportWindow() {
     if (reportData.responseSpeed) {
       sections.push({ id: 'responseSpeed', name: '回应速度', ref: sectionRefs.responseSpeed })
     }
+    if (reportData.lostFriend) {
+      sections.push({ id: 'lostFriend', name: '曾经的好朋友', ref: sectionRefs.lostFriend })
+    }
     if (reportData.topPhrases && reportData.topPhrases.length > 0) {
       sections.push({ id: 'topPhrases', name: '年度常用语', ref: sectionRefs.topPhrases })
     }
     sections.push({ id: 'ranking', name: '好友排行', ref: sectionRefs.ranking })
+    if (reportData.snsStats && reportData.snsStats.totalPosts > 0) {
+      sections.push({ id: 'sns', name: '朋友圈', ref: sectionRefs.sns })
+    }
     sections.push({ id: 'ending', name: '尾声', ref: sectionRefs.ending })
     return sections
   }
@@ -595,7 +483,8 @@ function AnnualReportWindow() {
 
       const dataUrl = outputCanvas.toDataURL('image/png')
       const link = document.createElement('a')
-      link.download = `${reportData?.year}年度报告${filterIds ? '_自定义' : ''}.png`
+      const yearFilePrefix = reportData ? formatYearLabel(reportData.year, false) : ''
+      link.download = `${yearFilePrefix}年度报告${filterIds ? '_自定义' : ''}.png`
       link.href = dataUrl
       document.body.appendChild(link)
       link.click()
@@ -658,11 +547,12 @@ function AnnualReportWindow() {
     }
 
     setExportProgress('正在写入文件...')
+    const yearFilePrefix = reportData ? formatYearLabel(reportData.year, false) : ''
     const exportResult = await window.electronAPI.annualReport.exportImages({
       baseDir: dirResult.filePaths[0],
-      folderName: `${reportData?.year}年度报告_分模块`,
+      folderName: `${yearFilePrefix}年度报告_分模块`,
       images: exportedImages.map((img) => ({
-        name: `${reportData?.year}年度报告_${img.name}.png`,
+        name: `${yearFilePrefix}年度报告_${img.name}.png`,
         dataUrl: img.data
       }))
     })
@@ -733,10 +623,14 @@ function AnnualReportWindow() {
     )
   }
 
-  const { year, totalMessages, totalFriends, coreFriends, monthlyTopFriends, peakDay, longestStreak, activityHeatmap, midnightKing, selfAvatarUrl, mutualFriend, socialInitiative, responseSpeed, topPhrases } = reportData
+  const { year, totalMessages, totalFriends, coreFriends, monthlyTopFriends, peakDay, longestStreak, activityHeatmap, midnightKing, selfAvatarUrl, mutualFriend, socialInitiative, responseSpeed, topPhrases, lostFriend } = reportData
   const topFriend = coreFriends[0]
   const mostActive = getMostActiveTime(activityHeatmap.data)
   const socialStoryName = topFriend?.displayName || '好友'
+  const yearTitle = formatYearLabel(year, true)
+  const yearTitleShort = formatYearLabel(year, false)
+  const monthlyTitle = year === 0 ? '历史以来月度好友' : `${year}年月度好友`
+  const phrasesTitle = year === 0 ? '你在历史以来的常用语' : `你在${year}年的年度常用语`
 
   return (
     <div className="annual-report-window">
@@ -827,7 +721,7 @@ function AnnualReportWindow() {
           {/* 封面 */}
           <section className="section" ref={sectionRefs.cover}>
             <div className="label-text">WEFLOW · ANNUAL REPORT</div>
-            <h1 className="hero-title">{year}年<br />微信聊天报告</h1>
+            <h1 className="hero-title">{yearTitle}<br />微信聊天报告</h1>
             <hr className="divider" />
             <p className="hero-desc">每一条消息背后<br />都藏着一段独特的故事</p>
           </section>
@@ -869,7 +763,7 @@ function AnnualReportWindow() {
           {/* 月度好友 */}
           <section className="section" ref={sectionRefs.monthlyFriends}>
             <div className="label-text">月度好友</div>
-            <h2 className="hero-title">{year}年月度好友</h2>
+            <h2 className="hero-title">{monthlyTitle}</h2>
             <p className="hero-desc">根据12个月的聊天习惯</p>
             <div className="monthly-orbit">
               {monthlyTopFriends.map((m, i) => (
@@ -883,7 +777,7 @@ function AnnualReportWindow() {
                 <Avatar url={selfAvatarUrl} name="我" size="lg" />
               </div>
             </div>
-            <p className="hero-desc">只要你想<br />我一直在</p>
+            <p className="hero-desc">你只管说<br />我一直在</p>
           </section>
 
           {/* 双向奔赴 */}
@@ -983,15 +877,15 @@ function AnnualReportWindow() {
           {midnightKing && (
             <section className="section" ref={sectionRefs.midnightKing}>
               <div className="label-text">深夜好友</div>
-              <h2 className="hero-title">当城市睡去</h2>
-              <p className="hero-desc">这一年你留下了</p>
+              <h2 className="hero-title">月光下的你</h2>
+              <p className="hero-desc">在这一年你留下了</p>
               <div className="big-stat">
                 <span className="stat-num">{midnightKing.count}</span>
                 <span className="stat-unit">条深夜的消息</span>
               </div>
               <p className="hero-desc">
-                其中 <span className="hl">{midnightKing.displayName}</span> 常常在深夜中陪着你。
-                <br />你和Ta的对话占深夜期间聊天的 <span className="gold">{midnightKing.percentage}%</span>。
+                其中 <span className="hl">{midnightKing.displayName}</span> 常常在深夜中陪着你胡思乱想。
+                <br />你和Ta的对话占你深夜期间聊天的 <span className="gold">{midnightKing.percentage}%</span>。
               </p>
             </section>
           )}
@@ -1012,11 +906,46 @@ function AnnualReportWindow() {
             </section>
           )}
 
+          {/* 曾经的好朋友 */}
+          {lostFriend && (
+            <section className="section" ref={sectionRefs.lostFriend}>
+              <div className="label-text">曾经的好朋友</div>
+              <h2 className="hero-title">{lostFriend.displayName}</h2>
+              <div className="big-stat">
+                <span className="stat-num">{formatNumber(lostFriend.earlyCount)}</span>
+                <span className="stat-unit">条消息</span>
+              </div>
+              <p className="hero-desc">
+                在 <span className="hl">{lostFriend.periodDesc}</span>
+                <br />你们曾有聊不完的话题
+              </p>
+              <div className="lost-friend-visual">
+                <div className="avatar-group sender">
+                  <Avatar url={lostFriend.avatarUrl} name={lostFriend.displayName} size="lg" />
+                  <span className="avatar-label">TA</span>
+                </div>
+                <div className="fading-line">
+                  <div className="line-path" />
+                  <div className="line-glow" />
+                  <div className="flow-particle" />
+                </div>
+                <div className="avatar-group receiver">
+                  <Avatar url={selfAvatarUrl} name="我" size="lg" />
+                  <span className="avatar-label">我</span>
+                </div>
+              </div>
+              <p className="hero-desc fading">
+                人类发明后悔
+                <br />来证明拥有的珍贵
+              </p>
+            </section>
+          )}
+
           {/* 年度常用语 - 词云 */}
           {topPhrases && topPhrases.length > 0 && (
             <section className="section" ref={sectionRefs.topPhrases}>
               <div className="label-text">年度常用语</div>
-              <h2 className="hero-title">你在{year}年的年度常用语</h2>
+              <h2 className="hero-title">{phrasesTitle}</h2>
               <p className="hero-desc">
                 这一年，你说得最多的是：
                 <br />
@@ -1026,6 +955,57 @@ function AnnualReportWindow() {
               </p>
               <WordCloud words={topPhrases} />
               <p className="hero-desc word-cloud-note">颜色越深代表出现频率越高</p>
+            </section>
+          )}
+
+          {/* 朋友圈 */}
+          {reportData.snsStats && reportData.snsStats.totalPosts > 0 && (
+            <section className="section" ref={sectionRefs.sns}>
+              <div className="label-text">朋友圈</div>
+              <h2 className="hero-title">记录生活时刻</h2>
+              <p className="hero-desc">
+                这一年，你发布了
+              </p>
+              <div className="big-stat">
+                <span className="stat-num">{reportData.snsStats.totalPosts}</span>
+                <span className="stat-unit">条朋友圈</span>
+              </div>
+
+              <div className="sns-stats-container" style={{ display: 'flex', gap: '60px', marginTop: '40px', justifyContent: 'center' }}>
+                {reportData.snsStats.topLikers.length > 0 && (
+                  <div className="sns-sub-stat" style={{ textAlign: 'left' }}>
+                    <h3 className="sub-title" style={{ fontSize: '18px', marginBottom: '16px', opacity: 0.8, borderBottom: '1px solid currentColor', paddingBottom: '8px' }}>更关心你的Ta</h3>
+                    <div className="mini-ranking">
+                      {reportData.snsStats.topLikers.slice(0, 3).map((u, i) => (
+                        <div key={i} className="mini-rank-item" style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '14px' }}>
+                          <Avatar url={u.avatarUrl} name={u.displayName} size="sm" />
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span className="name" style={{ fontSize: '15px', fontWeight: 500, maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.displayName}</span>
+                          </div>
+                          <span className="count hl" style={{ fontSize: '14px', marginLeft: 'auto' }}>{u.count}赞</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {reportData.snsStats.topLiked.length > 0 && (
+                  <div className="sns-sub-stat" style={{ textAlign: 'left' }}>
+                    <h3 className="sub-title" style={{ fontSize: '18px', marginBottom: '16px', opacity: 0.8, borderBottom: '1px solid currentColor', paddingBottom: '8px' }}>你最关心的Ta</h3>
+                    <div className="mini-ranking">
+                      {reportData.snsStats.topLiked.slice(0, 3).map((u, i) => (
+                        <div key={i} className="mini-rank-item" style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '14px' }}>
+                          <Avatar url={u.avatarUrl} name={u.displayName} size="sm" />
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span className="name" style={{ fontSize: '15px', fontWeight: 500, maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.displayName}</span>
+                          </div>
+                          <span className="count hl" style={{ fontSize: '14px', marginLeft: 'auto' }}>{u.count}赞</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </section>
           )}
 
@@ -1085,7 +1065,7 @@ function AnnualReportWindow() {
               <br />愿新的一年，
               <br />所有期待，皆有回声。
             </p>
-            <div className="ending-year">{year}</div>
+            <div className="ending-year">{yearTitleShort}</div>
             <div className="ending-brand">WEFLOW</div>
           </section>
         </div>

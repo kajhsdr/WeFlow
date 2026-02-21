@@ -1,6 +1,7 @@
-import { app, BrowserWindow, ipcMain, nativeTheme } from 'electron'
+import './preload-env'
+import { app, BrowserWindow, ipcMain, nativeTheme, session } from 'electron'
 import { Worker } from 'worker_threads'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { autoUpdater } from 'electron-updater'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -13,10 +14,16 @@ import { imagePreloadService } from './services/imagePreloadService'
 import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
 import { annualReportService } from './services/annualReportService'
-import { exportService, ExportOptions } from './services/exportService'
+import { exportService, ExportOptions, ExportProgress } from './services/exportService'
 import { KeyService } from './services/keyService'
 import { voiceTranscribeService } from './services/voiceTranscribeService'
 import { videoService } from './services/videoService'
+import { snsService, isVideoUrl } from './services/snsService'
+import { contactExportService } from './services/contactExportService'
+import { windowsHelloService } from './services/windowsHelloService'
+import { llamaService } from './services/llamaService'
+import { registerNotificationHandlers, showNotification } from './windows/notificationWindow'
+import { httpService } from './services/httpService'
 
 
 // 配置自动更新
@@ -27,6 +34,47 @@ const AUTO_UPDATE_ENABLED =
   process.env.AUTO_UPDATE_ENABLED === 'true' ||
   process.env.AUTO_UPDATE_ENABLED === '1' ||
   (process.env.AUTO_UPDATE_ENABLED == null && !process.env.VITE_DEV_SERVER_URL)
+
+// 使用白名单过滤 PATH，避免被第三方目录中的旧版 VC++ 运行库劫持。
+// 仅保留系统目录（Windows/System32/SysWOW64）和应用自身目录（可执行目录、resources）。
+function sanitizePathEnv() {
+  // 开发模式不做裁剪，避免影响本地工具链
+  if (process.env.VITE_DEV_SERVER_URL) return
+
+  const rawPath = process.env.PATH || process.env.Path
+  if (!rawPath) return
+
+  const sep = process.platform === 'win32' ? ';' : ':'
+  const parts = rawPath.split(sep).filter(Boolean)
+
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || ''
+  const safePrefixes = [
+    systemRoot,
+    systemRoot ? join(systemRoot, 'System32') : '',
+    systemRoot ? join(systemRoot, 'SysWOW64') : '',
+    dirname(process.execPath),
+    process.resourcesPath,
+    join(process.resourcesPath || '', 'resources')
+  ].filter(Boolean)
+
+  const normalize = (p: string) => p.replace(/\\/g, '/').toLowerCase()
+  const isSafe = (p: string) => {
+    const np = normalize(p)
+    return safePrefixes.some((prefix) => np.startsWith(normalize(prefix)))
+  }
+
+  const filtered = parts.filter(isSafe)
+  if (filtered.length !== parts.length) {
+    const removed = parts.filter((p) => !isSafe(p))
+    console.warn('[WeFlow] 使用白名单裁剪 PATH，移除目录:', removed)
+    const nextPath = filtered.join(sep)
+    process.env.PATH = nextPath
+    process.env.Path = nextPath
+  }
+}
+
+// 启动时立即清理 PATH，后续创建的 worker 也能继承安全的环境
+sanitizePathEnv()
 
 // 单例服务
 let configService: ConfigService | null = null
@@ -56,7 +104,8 @@ function createWindow(options: { autoShow?: boolean } = {}) {
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      webSecurity: false // Allow loading local files (video playback)
     },
     titleBarStyle: 'hidden',
     titleBarOverlay: {
@@ -93,6 +142,50 @@ function createWindow(options: { autoShow?: boolean } = {}) {
   } else {
     win.loadFile(join(__dirname, '../dist/index.html'))
   }
+
+  // Handle notification click navigation
+  ipcMain.on('notification-clicked', (_, sessionId) => {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    win.webContents.send('navigate-to-session', sessionId)
+  })
+
+  // 拦截请求，修改 Referer 和 User-Agent 以通过微信 CDN 鉴权
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    {
+      urls: [
+        '*://*.qpic.cn/*',
+        '*://*.qlogo.cn/*',
+        '*://*.wechat.com/*',
+        '*://*.weixin.qq.com/*'
+      ]
+    },
+    (details, callback) => {
+      details.requestHeaders['User-Agent'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) WindowsWechat(0x63090719) XWEB/8351"
+      details.requestHeaders['Accept'] = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+      details.requestHeaders['Accept-Encoding'] = "gzip, deflate, br"
+      details.requestHeaders['Accept-Language'] = "zh-CN,zh;q=0.9"
+      details.requestHeaders['Referer'] = "https://servicewechat.com/"
+      details.requestHeaders['Connection'] = "keep-alive"
+      details.requestHeaders['Range'] = "bytes=0-"
+      callback({ cancel: false, requestHeaders: details.requestHeaders })
+    }
+  )
+
+  // 忽略微信 CDN 域名的证书错误（部分节点证书配置不正确）
+  win.webContents.on('certificate-error', (event, url, _error, _cert, callback) => {
+    const trusted = ['.qq.com', '.qpic.cn', '.weixin.qq.com', '.wechat.com']
+    try {
+      const host = new URL(url).hostname
+      if (trusted.some(d => host.endsWith(d))) {
+        event.preventDefault()
+        callback(true)
+        return
+      }
+    } catch {}
+    callback(false)
+  })
 
   return win
 }
@@ -167,10 +260,11 @@ function createOnboardingWindow() {
     : join(process.resourcesPath, 'icon.ico')
 
   onboardingWindow = new BrowserWindow({
-    width: 1100,
-    height: 720,
+    width: 960,
+    height: 680,
     minWidth: 900,
-    minHeight: 600,
+    minHeight: 620,
+    resizable: false,
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
@@ -298,6 +392,124 @@ function createVideoPlayerWindow(videoPath: string, videoWidth?: number, videoHe
       hash: `/video-player-window?${videoParam}`
     })
   }
+}
+
+/**
+ * 创建独立的图片查看窗口
+ */
+function createImageViewerWindow(imagePath: string) {
+  const isDev = !!process.env.VITE_DEV_SERVER_URL
+  const iconPath = isDev
+    ? join(__dirname, '../public/icon.ico')
+    : join(process.resourcesPath, 'icon.ico')
+
+  const win = new BrowserWindow({
+    width: 900,
+    height: 700,
+    minWidth: 400,
+    minHeight: 300,
+    icon: iconPath,
+    webPreferences: {
+      preload: join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: false // 允许加载本地文件
+    },
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#00000000',
+      symbolColor: '#ffffff',
+      height: 40
+    },
+    show: false,
+    backgroundColor: '#000000',
+    autoHideMenuBar: true
+  })
+
+  win.once('ready-to-show', () => {
+    win.show()
+  })
+
+  const imageParam = `imagePath=${encodeURIComponent(imagePath)}`
+
+  if (process.env.VITE_DEV_SERVER_URL) {
+    win.loadURL(`${process.env.VITE_DEV_SERVER_URL}#/image-viewer-window?${imageParam}`)
+
+    win.webContents.on('before-input-event', (event, input) => {
+      if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) {
+        if (win.webContents.isDevToolsOpened()) {
+          win.webContents.closeDevTools()
+        } else {
+          win.webContents.openDevTools()
+        }
+        event.preventDefault()
+      }
+    })
+  } else {
+    win.loadFile(join(__dirname, '../dist/index.html'), {
+      hash: `/image-viewer-window?${imageParam}`
+    })
+  }
+
+  return win
+}
+
+/**
+ * 创建独立的聊天记录窗口
+ */
+function createChatHistoryWindow(sessionId: string, messageId: number) {
+  const isDev = !!process.env.VITE_DEV_SERVER_URL
+  const iconPath = isDev
+    ? join(__dirname, '../public/icon.ico')
+    : join(process.resourcesPath, 'icon.ico')
+
+  // 根据系统主题设置窗口背景色
+  const isDark = nativeTheme.shouldUseDarkColors
+
+  const win = new BrowserWindow({
+    width: 600,
+    height: 800,
+    minWidth: 400,
+    minHeight: 500,
+    icon: iconPath,
+    webPreferences: {
+      preload: join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    },
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#00000000',
+      symbolColor: isDark ? '#ffffff' : '#1a1a1a',
+      height: 32
+    },
+    show: false,
+    backgroundColor: isDark ? '#1A1A1A' : '#F0F0F0',
+    autoHideMenuBar: true
+  })
+
+  win.once('ready-to-show', () => {
+    win.show()
+  })
+
+  if (process.env.VITE_DEV_SERVER_URL) {
+    win.loadURL(`${process.env.VITE_DEV_SERVER_URL}#/chat-history/${sessionId}/${messageId}`)
+
+    win.webContents.on('before-input-event', (event, input) => {
+      if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) {
+        if (win.webContents.isDevToolsOpened()) {
+          win.webContents.closeDevTools()
+        } else {
+          win.webContents.openDevTools()
+        }
+        event.preventDefault()
+      }
+    })
+  } else {
+    win.loadFile(join(__dirname, '../dist/index.html'), {
+      hash: `/chat-history/${sessionId}/${messageId}`
+    })
+  }
 
   return win
 }
@@ -311,6 +523,7 @@ function showMainWindow() {
 
 // 注册 IPC 处理器
 function registerIpcHandlers() {
+  registerNotificationHandlers()
   // 配置相关
   ipcMain.handle('config:get', async (_, key: string) => {
     return configService?.get(key as any)
@@ -408,7 +621,7 @@ function registerIpcHandlers() {
 
     // 监听下载进度
     autoUpdater.on('download-progress', (progress) => {
-      win?.webContents.send('app:downloadProgress', progress.percent)
+      win?.webContents.send('app:downloadProgress', progress)
     })
 
     // 下载完成后自动安装
@@ -422,6 +635,11 @@ function registerIpcHandlers() {
       console.error('下载更新失败:', error)
       throw error
     }
+  })
+
+  ipcMain.handle('app:ignoreUpdate', async (_, version: string) => {
+    configService?.set('ignoredUpdateVersion', version)
+    return { success: true }
   })
 
   // 窗口控制
@@ -461,6 +679,12 @@ function registerIpcHandlers() {
   // 打开视频播放窗口
   ipcMain.handle('window:openVideoPlayerWindow', (_, videoPath: string, videoWidth?: number, videoHeight?: number) => {
     createVideoPlayerWindow(videoPath, videoWidth, videoHeight)
+  })
+
+  // 打开聊天记录窗口
+  ipcMain.handle('window:openChatHistoryWindow', (_, sessionId: string, messageId: number) => {
+    createChatHistoryWindow(sessionId, messageId)
+    return true
   })
 
   // 根据视频尺寸调整窗口大小
@@ -540,6 +764,10 @@ function registerIpcHandlers() {
     return dbPathService.scanWxids(rootPath)
   })
 
+  ipcMain.handle('dbpath:scanWxidCandidates', async (_, rootPath: string) => {
+    return dbPathService.scanWxidCandidates(rootPath)
+  })
+
   ipcMain.handle('dbpath:getDefault', async () => {
     return dbPathService.getDefaultPath()
   })
@@ -573,20 +801,98 @@ function registerIpcHandlers() {
     return chatService.enrichSessionsContactInfo(usernames)
   })
 
-  ipcMain.handle('chat:getMessages', async (_, sessionId: string, offset?: number, limit?: number) => {
-    return chatService.getMessages(sessionId, offset, limit)
+  ipcMain.handle('chat:getMessages', async (_, sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) => {
+    return chatService.getMessages(sessionId, offset, limit, startTime, endTime, ascending)
   })
 
   ipcMain.handle('chat:getLatestMessages', async (_, sessionId: string, limit?: number) => {
     return chatService.getLatestMessages(sessionId, limit)
   })
 
-  ipcMain.handle('chat:getContact', async (_, username: string) => {
-    return chatService.getContact(username)
+  ipcMain.handle('chat:getNewMessages', async (_, sessionId: string, minTime: number, limit?: number) => {
+    return chatService.getNewMessages(sessionId, minTime, limit)
   })
 
+  ipcMain.handle('chat:updateMessage', async (_, sessionId: string, localId: number, createTime: number, newContent: string) => {
+    return chatService.updateMessage(sessionId, localId, createTime, newContent)
+  })
+
+  ipcMain.handle('chat:deleteMessage', async (_, sessionId: string, localId: number, createTime: number, dbPathHint?: string) => {
+    return chatService.deleteMessage(sessionId, localId, createTime, dbPathHint)
+  })
+
+  ipcMain.handle('chat:getContact', async (_, username: string) => {
+    return await chatService.getContact(username)
+  })
+
+  // Llama AI
+  ipcMain.handle('llama:init', async () => {
+    return await llamaService.init()
+  })
+
+  ipcMain.handle('llama:loadModel', async (_, modelPath: string) => {
+    return llamaService.loadModel(modelPath)
+  })
+
+  ipcMain.handle('llama:createSession', async (_, systemPrompt?: string) => {
+    return llamaService.createSession(systemPrompt)
+  })
+
+  ipcMain.handle('llama:chat', async (event, message: string, options?: { thinking?: boolean }) => {
+    // We use a callback to stream back to the renderer
+    const webContents = event.sender
+    try {
+      if (!webContents) return { success: false, error: 'No sender' }
+
+      const response = await llamaService.chat(message, options, (token) => {
+        if (!webContents.isDestroyed()) {
+          webContents.send('llama:token', token)
+        }
+      })
+      return { success: true, response }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle('llama:downloadModel', async (event, url: string, savePath: string) => {
+    const webContents = event.sender
+    try {
+      await llamaService.downloadModel(url, savePath, (payload) => {
+        if (!webContents.isDestroyed()) {
+          webContents.send('llama:downloadProgress', payload)
+        }
+      })
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle('llama:getModelsPath', async () => {
+    return llamaService.getModelsPath()
+  })
+
+  ipcMain.handle('llama:checkFileExists', async (_, filePath: string) => {
+    const { existsSync } = await import('fs')
+    return existsSync(filePath)
+  })
+
+  ipcMain.handle('llama:getModelStatus', async (_, modelPath: string) => {
+    return llamaService.getModelStatus(modelPath)
+  })
+
+
   ipcMain.handle('chat:getContactAvatar', async (_, username: string) => {
-    return chatService.getContactAvatar(username)
+    return await chatService.getContactAvatar(username)
+  })
+
+  ipcMain.handle('chat:resolveTransferDisplayNames', async (_, chatroomId: string, payerUsername: string, receiverUsername: string) => {
+    return await chatService.resolveTransferDisplayNames(chatroomId, payerUsername, receiverUsername)
+  })
+
+  ipcMain.handle('chat:getContacts', async () => {
+    return await chatService.getContacts()
   })
 
   ipcMain.handle('chat:getCachedMessages', async (_, sessionId: string) => {
@@ -617,6 +923,12 @@ function registerIpcHandlers() {
   ipcMain.handle('chat:getVoiceData', async (_, sessionId: string, msgId: string, createTime?: number, serverId?: string | number) => {
     return chatService.getVoiceData(sessionId, msgId, createTime, serverId)
   })
+  ipcMain.handle('chat:getAllVoiceMessages', async (_, sessionId: string) => {
+    return chatService.getAllVoiceMessages(sessionId)
+  })
+  ipcMain.handle('chat:getMessageDates', async (_, sessionId: string) => {
+    return chatService.getMessageDates(sessionId)
+  })
   ipcMain.handle('chat:resolveVoiceCache', async (_, sessionId: string, msgId: string) => {
     return chatService.resolveVoiceCache(sessionId, msgId)
   })
@@ -627,8 +939,82 @@ function registerIpcHandlers() {
     })
   })
 
-  ipcMain.handle('chat:getMessageById', async (_, sessionId: string, localId: number) => {
+  ipcMain.handle('chat:getMessage', async (_, sessionId: string, localId: number) => {
     return chatService.getMessageById(sessionId, localId)
+  })
+
+  ipcMain.handle('chat:execQuery', async (_, kind: string, path: string | null, sql: string) => {
+    return chatService.execQuery(kind, path, sql)
+  })
+
+  ipcMain.handle('sns:getTimeline', async (_, limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) => {
+    return snsService.getTimeline(limit, offset, usernames, keyword, startTime, endTime)
+  })
+
+  ipcMain.handle('sns:debugResource', async (_, url: string) => {
+    return snsService.debugResource(url)
+  })
+
+  ipcMain.handle('sns:proxyImage', async (_, payload: string | { url: string; key?: string | number }) => {
+    const url = typeof payload === 'string' ? payload : payload?.url
+    const key = typeof payload === 'string' ? undefined : payload?.key
+    return snsService.proxyImage(url, key)
+  })
+
+  ipcMain.handle('sns:downloadImage', async (_, payload: { url: string; key?: string | number }) => {
+    try {
+      const { url, key } = payload
+      const result = await snsService.downloadImage(url, key)
+
+      if (!result.success || !result.data) {
+        return { success: false, error: result.error || '下载图片失败' }
+      }
+
+      const { dialog } = await import('electron')
+      const ext = (result.contentType || '').split('/')[1] || 'jpg'
+      const defaultPath = `SNS_${Date.now()}.${ext}`
+
+
+      const filters = isVideoUrl(url)
+        ? [{ name: 'Videos', extensions: ['mp4', 'mov', 'avi', 'mkv'] }]
+        : [{ name: 'Images', extensions: [ext, 'jpg', 'jpeg', 'png', 'webp', 'gif'] }]
+
+      const { filePath, canceled } = await dialog.showSaveDialog({
+        defaultPath,
+        filters
+      })
+
+      if (canceled || !filePath) {
+        return { success: false, error: '用户已取消' }
+      }
+
+      const fs = await import('fs/promises')
+      await fs.writeFile(filePath, result.data)
+
+      return { success: true, filePath }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  })
+
+  ipcMain.handle('sns:exportTimeline', async (event, options: any) => {
+    return snsService.exportTimeline(options, (progress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('sns:exportProgress', progress)
+      }
+    })
+  })
+
+  ipcMain.handle('sns:selectExportDir', async () => {
+    const { dialog } = await import('electron')
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory', 'createDirectory'],
+      title: '选择导出目录'
+    })
+    if (result.canceled || !result.filePaths?.[0]) {
+      return { canceled: true }
+    }
+    return { canceled: false, filePath: result.filePaths[0] }
   })
 
   // 私聊克隆
@@ -645,13 +1031,37 @@ function registerIpcHandlers() {
     return true
   })
 
+  // Windows Hello
+  ipcMain.handle('auth:hello', async (event, message?: string) => {
+    // 无论哪个窗口调用，都尝试强制附着到主窗口，确保体验一致
+    // 如果主窗口不存在（极其罕见），则回退到调用者窗口
+    const targetWin = (mainWindow && !mainWindow.isDestroyed())
+      ? mainWindow
+      : (BrowserWindow.fromWebContents(event.sender) || undefined)
+
+    return windowsHelloService.verify(message, targetWin)
+  })
+
   // 导出相关
-  ipcMain.handle('export:exportSessions', async (_, sessionIds: string[], outputDir: string, options: ExportOptions) => {
-    return exportService.exportSessions(sessionIds, outputDir, options)
+  ipcMain.handle('export:getExportStats', async (_, sessionIds: string[], options: any) => {
+    return exportService.getExportStats(sessionIds, options)
+  })
+
+  ipcMain.handle('export:exportSessions', async (event, sessionIds: string[], outputDir: string, options: ExportOptions) => {
+    const onProgress = (progress: ExportProgress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('export:progress', progress)
+      }
+    }
+    return exportService.exportSessions(sessionIds, outputDir, options, onProgress)
   })
 
   ipcMain.handle('export:exportSession', async (_, sessionId: string, outputPath: string, options: ExportOptions) => {
     return exportService.exportSessionToChatLab(sessionId, outputPath, options)
+  })
+
+  ipcMain.handle('export:exportContacts', async (_, outputDir: string, options: any) => {
+    return contactExportService.exportContacts(outputDir, options)
   })
 
   // 数据分析相关
@@ -659,12 +1069,24 @@ function registerIpcHandlers() {
     return analyticsService.getOverallStatistics(force)
   })
 
-  ipcMain.handle('analytics:getContactRankings', async (_, limit?: number) => {
-    return analyticsService.getContactRankings(limit)
+  ipcMain.handle('analytics:getContactRankings', async (_, limit?: number, beginTimestamp?: number, endTimestamp?: number) => {
+    return analyticsService.getContactRankings(limit, beginTimestamp, endTimestamp)
   })
 
   ipcMain.handle('analytics:getTimeDistribution', async () => {
     return analyticsService.getTimeDistribution()
+  })
+
+  ipcMain.handle('analytics:getExcludedUsernames', async () => {
+    return analyticsService.getExcludedUsernames()
+  })
+
+  ipcMain.handle('analytics:setExcludedUsernames', async (_, usernames: string[]) => {
+    return analyticsService.setExcludedUsernames(usernames)
+  })
+
+  ipcMain.handle('analytics:getExcludeCandidates', async () => {
+    return analyticsService.getExcludeCandidates()
   })
 
   // 缓存管理
@@ -732,10 +1154,26 @@ function registerIpcHandlers() {
     return groupAnalyticsService.getGroupMediaStats(chatroomId, startTime, endTime)
   })
 
+  ipcMain.handle('groupAnalytics:exportGroupMembers', async (_, chatroomId: string, outputPath: string) => {
+    return groupAnalyticsService.exportGroupMembers(chatroomId, outputPath)
+  })
+
+  ipcMain.handle(
+    'groupAnalytics:exportGroupMemberMessages',
+    async (_, chatroomId: string, memberUsername: string, outputPath: string, startTime?: number, endTime?: number) => {
+      return groupAnalyticsService.exportGroupMemberMessages(chatroomId, memberUsername, outputPath, startTime, endTime)
+    }
+  )
+
   // 打开协议窗口
   ipcMain.handle('window:openAgreementWindow', async () => {
     createAgreementWindow()
     return true
+  })
+
+  // 打开图片查看窗口
+  ipcMain.handle('window:openImageViewerWindow', (_, imagePath: string) => {
+    createImageViewerWindow(imagePath)
   })
 
   // 完成引导，关闭引导窗口并显示主窗口
@@ -835,6 +1273,74 @@ function registerIpcHandlers() {
     })
   })
 
+  ipcMain.handle('dualReport:generateReport', async (_, payload: { friendUsername: string; year: number }) => {
+    const cfg = configService || new ConfigService()
+    configService = cfg
+
+    const dbPath = cfg.get('dbPath')
+    const decryptKey = cfg.get('decryptKey')
+    const wxid = cfg.get('myWxid')
+    const logEnabled = cfg.get('logEnabled')
+    const friendUsername = payload?.friendUsername
+    const year = payload?.year ?? 0
+    const excludeWords = cfg.get('wordCloudExcludeWords') || []
+
+    if (!friendUsername) {
+      return { success: false, error: '缺少好友用户名' }
+    }
+
+    const resourcesPath = app.isPackaged
+      ? join(process.resourcesPath, 'resources')
+      : join(app.getAppPath(), 'resources')
+    const userDataPath = app.getPath('userData')
+
+    const workerPath = join(__dirname, 'dualReportWorker.js')
+
+    return await new Promise((resolve) => {
+      const worker = new Worker(workerPath, {
+        workerData: { year, friendUsername, dbPath, decryptKey, myWxid: wxid, resourcesPath, userDataPath, logEnabled, excludeWords }
+      })
+
+      const cleanup = () => {
+        worker.removeAllListeners()
+      }
+
+      worker.on('message', (msg: any) => {
+        if (msg && msg.type === 'dualReport:progress') {
+          for (const win of BrowserWindow.getAllWindows()) {
+            if (!win.isDestroyed()) {
+              win.webContents.send('dualReport:progress', msg.data)
+            }
+          }
+          return
+        }
+        if (msg && (msg.type === 'dualReport:result' || msg.type === 'done')) {
+          cleanup()
+          void worker.terminate()
+          resolve(msg.data ?? msg.result)
+          return
+        }
+        if (msg && (msg.type === 'dualReport:error' || msg.type === 'error')) {
+          cleanup()
+          void worker.terminate()
+          resolve({ success: false, error: msg.error || '双人报告生成失败' })
+        }
+      })
+
+      worker.on('error', (err) => {
+        cleanup()
+        resolve({ success: false, error: String(err) })
+      })
+
+      worker.on('exit', (code) => {
+        if (code !== 0) {
+          cleanup()
+          resolve({ success: false, error: `双人报告线程异常退出: ${code}` })
+        }
+      })
+    })
+  })
+
   ipcMain.handle('annualReport:exportImages', async (_, payload: { baseDir: string; folderName: string; images: Array<{ name: string; dataUrl: string }> }) => {
     try {
       const { baseDir, folderName, images } = payload
@@ -880,6 +1386,24 @@ function registerIpcHandlers() {
     })
   })
 
+  // HTTP API 服务
+  ipcMain.handle('http:start', async (_, port?: number) => {
+    return httpService.start(port || 5031)
+  })
+
+  ipcMain.handle('http:stop', async () => {
+    await httpService.stop()
+    return { success: true }
+  })
+
+  ipcMain.handle('http:status', async () => {
+    return {
+      running: httpService.isRunning(),
+      port: httpService.getPort(),
+      mediaExportPath: httpService.getDefaultMediaExportPath()
+    }
+  })
+
 }
 
 // 主窗口引用
@@ -898,7 +1422,16 @@ function checkForUpdatesOnStartup() {
       if (result && result.updateInfo) {
         const currentVersion = app.getVersion()
         const latestVersion = result.updateInfo.version
+
+        // 检查是否有新版本
         if (latestVersion !== currentVersion && mainWindow) {
+          // 检查该版本是否被用户忽略
+          const ignoredVersion = configService?.get('ignoredUpdateVersion')
+          if (ignoredVersion === latestVersion) {
+
+            return
+          }
+
           // 通知渲染进程有新版本
           mainWindow.webContents.send('app:updateAvailable', {
             version: latestVersion,
@@ -930,6 +1463,17 @@ app.whenReady().then(() => {
   if (!onboardingDone) {
     createOnboardingWindow()
   }
+
+  // 解决朋友圈图片无法加载问题（添加 Referer）
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    {
+      urls: ['*://*.qpic.cn/*', '*://*.wx.qq.com/*']
+    },
+    (details, callback) => {
+      details.requestHeaders['Referer'] = 'https://wx.qq.com/'
+      callback({ requestHeaders: details.requestHeaders })
+    }
+  )
 
   // 启动时检测更新
   checkForUpdatesOnStartup()

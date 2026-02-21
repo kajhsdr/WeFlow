@@ -9,6 +9,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     clear: () => ipcRenderer.invoke('config:clear')
   },
 
+  // 通知
+  notification: {
+    show: (data: any) => ipcRenderer.invoke('notification:show', data),
+    close: () => ipcRenderer.invoke('notification:close'),
+    click: (sessionId: string) => ipcRenderer.send('notification-clicked', sessionId),
+    ready: () => ipcRenderer.send('notification:ready'),
+    resize: (width: number, height: number) => ipcRenderer.send('notification:resize', { width, height }),
+    onShow: (callback: (event: any, data: any) => void) => {
+      ipcRenderer.on('notification:show', callback)
+      return () => ipcRenderer.removeAllListeners('notification:show')
+    }
+  },
+
+  // 认证
+  auth: {
+    hello: (message?: string) => ipcRenderer.invoke('auth:hello', message)
+  },
+
 
   // 对话框
   dialog: {
@@ -29,7 +47,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
     downloadAndInstall: () => ipcRenderer.invoke('app:downloadAndInstall'),
-    onDownloadProgress: (callback: (progress: number) => void) => {
+    ignoreUpdate: (version: string) => ipcRenderer.invoke('app:ignoreUpdate', version),
+    onDownloadProgress: (callback: (progress: any) => void) => {
       ipcRenderer.on('app:downloadProgress', (_, progress) => callback(progress))
       return () => ipcRenderer.removeAllListeners('app:downloadProgress')
     },
@@ -42,7 +61,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 日志
   log: {
     getPath: () => ipcRenderer.invoke('log:getPath'),
-    read: () => ipcRenderer.invoke('log:read')
+    read: () => ipcRenderer.invoke('log:read'),
+    debug: (data: any) => ipcRenderer.send('log:debug', data)
   },
 
   // 窗口控制
@@ -57,13 +77,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openVideoPlayerWindow: (videoPath: string, videoWidth?: number, videoHeight?: number) =>
       ipcRenderer.invoke('window:openVideoPlayerWindow', videoPath, videoWidth, videoHeight),
     resizeToFitVideo: (videoWidth: number, videoHeight: number) =>
-      ipcRenderer.invoke('window:resizeToFitVideo', videoWidth, videoHeight)
+      ipcRenderer.invoke('window:resizeToFitVideo', videoWidth, videoHeight),
+    openImageViewerWindow: (imagePath: string) =>
+      ipcRenderer.invoke('window:openImageViewerWindow', imagePath),
+    openChatHistoryWindow: (sessionId: string, messageId: number) =>
+      ipcRenderer.invoke('window:openChatHistoryWindow', sessionId, messageId)
   },
 
   // 数据库路径
   dbPath: {
     autoDetect: () => ipcRenderer.invoke('dbpath:autoDetect'),
     scanWxids: (rootPath: string) => ipcRenderer.invoke('dbpath:scanWxids', rootPath),
+    scanWxidCandidates: (rootPath: string) => ipcRenderer.invoke('dbpath:scanWxidCandidates', rootPath),
     getDefault: () => ipcRenderer.invoke('dbpath:getDefault')
   },
 
@@ -98,12 +123,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSessions: () => ipcRenderer.invoke('chat:getSessions'),
     enrichSessionsContactInfo: (usernames: string[]) =>
       ipcRenderer.invoke('chat:enrichSessionsContactInfo', usernames),
-    getMessages: (sessionId: string, offset?: number, limit?: number) =>
-      ipcRenderer.invoke('chat:getMessages', sessionId, offset, limit),
+    getMessages: (sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) =>
+      ipcRenderer.invoke('chat:getMessages', sessionId, offset, limit, startTime, endTime, ascending),
     getLatestMessages: (sessionId: string, limit?: number) =>
       ipcRenderer.invoke('chat:getLatestMessages', sessionId, limit),
+    getNewMessages: (sessionId: string, minTime: number, limit?: number) =>
+      ipcRenderer.invoke('chat:getNewMessages', sessionId, minTime, limit),
     getContact: (username: string) => ipcRenderer.invoke('chat:getContact', username),
     getContactAvatar: (username: string) => ipcRenderer.invoke('chat:getContactAvatar', username),
+    updateMessage: (sessionId: string, localId: number, createTime: number, newContent: string) =>
+      ipcRenderer.invoke('chat:updateMessage', sessionId, localId, createTime, newContent),
+    deleteMessage: (sessionId: string, localId: number, createTime: number, dbPathHint?: string) =>
+      ipcRenderer.invoke('chat:deleteMessage', sessionId, localId, createTime, dbPathHint),
+    resolveTransferDisplayNames: (chatroomId: string, payerUsername: string, receiverUsername: string) =>
+      ipcRenderer.invoke('chat:resolveTransferDisplayNames', chatroomId, payerUsername, receiverUsername),
     getMyAvatarUrl: () => ipcRenderer.invoke('chat:getMyAvatarUrl'),
     downloadEmoji: (cdnUrl: string, md5?: string) => ipcRenderer.invoke('chat:downloadEmoji', cdnUrl, md5),
     getCachedMessages: (sessionId: string) => ipcRenderer.invoke('chat:getCachedMessages', sessionId),
@@ -112,12 +145,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getImageData: (sessionId: string, msgId: string) => ipcRenderer.invoke('chat:getImageData', sessionId, msgId),
     getVoiceData: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number) =>
       ipcRenderer.invoke('chat:getVoiceData', sessionId, msgId, createTime, serverId),
+    getAllVoiceMessages: (sessionId: string) => ipcRenderer.invoke('chat:getAllVoiceMessages', sessionId),
+    getMessageDates: (sessionId: string) => ipcRenderer.invoke('chat:getMessageDates', sessionId),
     resolveVoiceCache: (sessionId: string, msgId: string) => ipcRenderer.invoke('chat:resolveVoiceCache', sessionId, msgId),
     getVoiceTranscript: (sessionId: string, msgId: string, createTime?: number) => ipcRenderer.invoke('chat:getVoiceTranscript', sessionId, msgId, createTime),
     onVoiceTranscriptPartial: (callback: (payload: { msgId: string; text: string }) => void) => {
       const listener = (_: any, payload: { msgId: string; text: string }) => callback(payload)
       ipcRenderer.on('chat:voiceTranscriptPartial', listener)
       return () => ipcRenderer.removeListener('chat:voiceTranscriptPartial', listener)
+    },
+    execQuery: (kind: string, path: string | null, sql: string) =>
+      ipcRenderer.invoke('chat:execQuery', kind, path, sql),
+    getContacts: () => ipcRenderer.invoke('chat:getContacts'),
+    getMessage: (sessionId: string, localId: number) =>
+      ipcRenderer.invoke('chat:getMessage', sessionId, localId),
+    onWcdbChange: (callback: (event: any, data: { type: string; json: string }) => void) => {
+      ipcRenderer.on('wcdb-change', callback)
+      return () => ipcRenderer.removeListener('wcdb-change', callback)
     }
   },
 
@@ -149,9 +193,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 数据分析
   analytics: {
-    getOverallStatistics: () => ipcRenderer.invoke('analytics:getOverallStatistics'),
-    getContactRankings: (limit?: number) => ipcRenderer.invoke('analytics:getContactRankings', limit),
+    getOverallStatistics: (force?: boolean) => ipcRenderer.invoke('analytics:getOverallStatistics', force),
+    getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number) =>
+      ipcRenderer.invoke('analytics:getContactRankings', limit, beginTimestamp, endTimestamp),
     getTimeDistribution: () => ipcRenderer.invoke('analytics:getTimeDistribution'),
+    getExcludedUsernames: () => ipcRenderer.invoke('analytics:getExcludedUsernames'),
+    setExcludedUsernames: (usernames: string[]) => ipcRenderer.invoke('analytics:setExcludedUsernames', usernames),
+    getExcludeCandidates: () => ipcRenderer.invoke('analytics:getExcludeCandidates'),
     onProgress: (callback: (payload: { status: string; progress: number }) => void) => {
       ipcRenderer.on('analytics:progress', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('analytics:progress')
@@ -171,7 +219,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getGroupMembers: (chatroomId: string) => ipcRenderer.invoke('groupAnalytics:getGroupMembers', chatroomId),
     getGroupMessageRanking: (chatroomId: string, limit?: number, startTime?: number, endTime?: number) => ipcRenderer.invoke('groupAnalytics:getGroupMessageRanking', chatroomId, limit, startTime, endTime),
     getGroupActiveHours: (chatroomId: string, startTime?: number, endTime?: number) => ipcRenderer.invoke('groupAnalytics:getGroupActiveHours', chatroomId, startTime, endTime),
-    getGroupMediaStats: (chatroomId: string, startTime?: number, endTime?: number) => ipcRenderer.invoke('groupAnalytics:getGroupMediaStats', chatroomId, startTime, endTime)
+    getGroupMediaStats: (chatroomId: string, startTime?: number, endTime?: number) => ipcRenderer.invoke('groupAnalytics:getGroupMediaStats', chatroomId, startTime, endTime),
+    exportGroupMembers: (chatroomId: string, outputPath: string) => ipcRenderer.invoke('groupAnalytics:exportGroupMembers', chatroomId, outputPath),
+    exportGroupMemberMessages: (chatroomId: string, memberUsername: string, outputPath: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('groupAnalytics:exportGroupMemberMessages', chatroomId, memberUsername, outputPath, startTime, endTime)
   },
 
   // 年度报告
@@ -185,13 +236,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeAllListeners('annualReport:progress')
     }
   },
+  dualReport: {
+    generateReport: (payload: { friendUsername: string; year: number }) =>
+      ipcRenderer.invoke('dualReport:generateReport', payload),
+    onProgress: (callback: (payload: { status: string; progress: number }) => void) => {
+      ipcRenderer.on('dualReport:progress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('dualReport:progress')
+    }
+  },
 
   // 导出
   export: {
+    getExportStats: (sessionIds: string[], options: any) =>
+      ipcRenderer.invoke('export:getExportStats', sessionIds, options),
     exportSessions: (sessionIds: string[], outputDir: string, options: any) =>
       ipcRenderer.invoke('export:exportSessions', sessionIds, outputDir, options),
     exportSession: (sessionId: string, outputPath: string, options: any) =>
-      ipcRenderer.invoke('export:exportSession', sessionId, outputPath, options)
+      ipcRenderer.invoke('export:exportSession', sessionId, outputPath, options),
+    exportContacts: (outputDir: string, options: any) =>
+      ipcRenderer.invoke('export:exportContacts', outputDir, options),
+    onProgress: (callback: (payload: { current: number; total: number; currentSession: string; phase: string }) => void) => {
+      ipcRenderer.on('export:progress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('export:progress')
+    }
   },
 
   whisper: {
@@ -203,5 +270,48 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('whisper:downloadProgress', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('whisper:downloadProgress')
     }
+  },
+
+  // 朋友圈
+  sns: {
+    getTimeline: (limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) =>
+      ipcRenderer.invoke('sns:getTimeline', limit, offset, usernames, keyword, startTime, endTime),
+    debugResource: (url: string) => ipcRenderer.invoke('sns:debugResource', url),
+    proxyImage: (payload: { url: string; key?: string | number }) => ipcRenderer.invoke('sns:proxyImage', payload),
+    downloadImage: (payload: { url: string; key?: string | number }) => ipcRenderer.invoke('sns:downloadImage', payload),
+    exportTimeline: (options: any) => ipcRenderer.invoke('sns:exportTimeline', options),
+    onExportProgress: (callback: (payload: any) => void) => {
+      ipcRenderer.on('sns:exportProgress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('sns:exportProgress')
+    },
+    selectExportDir: () => ipcRenderer.invoke('sns:selectExportDir')
+  },
+
+  // Llama AI
+  llama: {
+    loadModel: (modelPath: string) => ipcRenderer.invoke('llama:loadModel', modelPath),
+    createSession: (systemPrompt?: string) => ipcRenderer.invoke('llama:createSession', systemPrompt),
+    chat: (message: string, options?: any) => ipcRenderer.invoke('llama:chat', message, options),
+    downloadModel: (url: string, savePath: string) => ipcRenderer.invoke('llama:downloadModel', url, savePath),
+    getModelsPath: () => ipcRenderer.invoke('llama:getModelsPath'),
+    checkFileExists: (filePath: string) => ipcRenderer.invoke('llama:checkFileExists', filePath),
+    getModelStatus: (modelPath: string) => ipcRenderer.invoke('llama:getModelStatus', modelPath),
+    onToken: (callback: (token: string) => void) => {
+      const listener = (_: any, token: string) => callback(token)
+      ipcRenderer.on('llama:token', listener)
+      return () => ipcRenderer.removeListener('llama:token', listener)
+    },
+    onDownloadProgress: (callback: (payload: { downloaded: number; total: number; speed: number }) => void) => {
+      const listener = (_: any, payload: { downloaded: number; total: number; speed: number }) => callback(payload)
+      ipcRenderer.on('llama:downloadProgress', listener)
+      return () => ipcRenderer.removeListener('llama:downloadProgress', listener)
+    }
+  },
+
+  // HTTP API 服务
+  http: {
+    start: (port?: number) => ipcRenderer.invoke('http:start', port),
+    stop: () => ipcRenderer.invoke('http:stop'),
+    status: () => ipcRenderer.invoke('http:status')
   }
 })

@@ -8,33 +8,33 @@
   --primary-light: rgba(139, 115, 85, 0.1);
   --danger: #dc3545;
   --warning: #ffc107;
-  
+
   // 背景
   --bg-primary: #F0EEE9;
   --bg-secondary: rgba(255, 255, 255, 0.7);
   --bg-tertiary: rgba(0, 0, 0, 0.03);
   --bg-hover: rgba(0, 0, 0, 0.05);
-  
+
   // 文字
   --text-primary: #3d3d3d;
   --text-secondary: #666666;
   --text-tertiary: #999999;
-  
+
   // 边框
   --border-color: rgba(0, 0, 0, 0.08);
   --border-radius: 9999px;
-  
+
   // 阴影
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
-  
+
   // 侧边栏
   --sidebar-width: 220px;
-  
+
   // 主题渐变
   --bg-gradient: linear-gradient(135deg, #F0EEE9 0%, #E8E6E1 100%);
   --primary-gradient: linear-gradient(135deg, #8B7355 0%, #A68B5B 100%);
-  
+
   // 卡片背景
   --card-bg: rgba(255, 255, 255, 0.7);
 }
@@ -45,6 +45,7 @@
 [data-theme="cloud-dancer"][data-mode="light"],
 [data-theme="cloud-dancer"]:not([data-mode]) {
   --primary: #8B7355;
+  --primary-rgb: 139, 115, 85;
   --primary-hover: #7A6548;
   --primary-light: rgba(139, 115, 85, 0.1);
   --bg-primary: #F0EEE9;
@@ -64,6 +65,7 @@
 [data-theme="corundum-blue"][data-mode="light"],
 [data-theme="corundum-blue"]:not([data-mode]) {
   --primary: #4A6670;
+  --primary-rgb: 74, 102, 112;
   --primary-hover: #3D565E;
   --primary-light: rgba(74, 102, 112, 0.1);
   --bg-primary: #E8EEF0;
@@ -83,6 +85,7 @@
 [data-theme="kiwi-green"][data-mode="light"],
 [data-theme="kiwi-green"]:not([data-mode]) {
   --primary: #7A9A5C;
+  --primary-rgb: 122, 154, 92;
   --primary-hover: #6A8A4C;
   --primary-light: rgba(122, 154, 92, 0.1);
   --bg-primary: #E8F0E4;
@@ -102,6 +105,7 @@
 [data-theme="spicy-red"][data-mode="light"],
 [data-theme="spicy-red"]:not([data-mode]) {
   --primary: #8B4049;
+  --primary-rgb: 139, 64, 73;
   --primary-hover: #7A3540;
   --primary-light: rgba(139, 64, 73, 0.1);
   --bg-primary: #F0E8E8;
@@ -121,6 +125,7 @@
 [data-theme="teal-water"][data-mode="light"],
 [data-theme="teal-water"]:not([data-mode]) {
   --primary: #5A8A8A;
+  --primary-rgb: 90, 138, 138;
   --primary-hover: #4A7A7A;
   --primary-light: rgba(90, 138, 138, 0.1);
   --bg-primary: #E4F0F0;
@@ -141,6 +146,7 @@
 // 云上舞白 - 深色
 [data-theme="cloud-dancer"][data-mode="dark"] {
   --primary: #C9A86C;
+  --primary-rgb: 201, 168, 108;
   --primary-hover: #D9B87C;
   --primary-light: rgba(201, 168, 108, 0.15);
   --bg-primary: #1a1816;
@@ -159,6 +165,7 @@
 // 刚玉蓝 - 深色
 [data-theme="corundum-blue"][data-mode="dark"] {
   --primary: #6A9AAA;
+  --primary-rgb: 106, 154, 170;
   --primary-hover: #7AAABA;
   --primary-light: rgba(106, 154, 170, 0.15);
   --bg-primary: #141a1c;
@@ -177,6 +184,7 @@
 // 冰猕猴桃汁绿 - 深色
 [data-theme="kiwi-green"][data-mode="dark"] {
   --primary: #9ABA7C;
+  --primary-rgb: 154, 186, 124;
   --primary-hover: #AACA8C;
   --primary-light: rgba(154, 186, 124, 0.15);
   --bg-primary: #161a14;
@@ -195,6 +203,7 @@
 // 辛辣红 - 深色
 [data-theme="spicy-red"][data-mode="dark"] {
   --primary: #C06068;
+  --primary-rgb: 192, 96, 104;
   --primary-hover: #D07078;
   --primary-light: rgba(192, 96, 104, 0.15);
   --bg-primary: #1a1416;
@@ -213,6 +222,7 @@
 // 明水鸭色 - 深色
 [data-theme="teal-water"][data-mode="dark"] {
   --primary: #7ABAAA;
+  --primary-rgb: 122, 186, 170;
   --primary-hover: #8ACABA;
   --primary-light: rgba(122, 186, 170, 0.15);
   --bg-primary: #121a1a;
@@ -235,7 +245,8 @@
   box-sizing: border-box;
 }
 
-html, body {
+html,
+body {
   height: 100%;
   font-family: 'HarmonyOS Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
@@ -263,7 +274,7 @@ html, body {
 ::-webkit-scrollbar-thumb {
   background: var(--text-tertiary);
   border-radius: 3px;
-  
+
   &:hover {
     background: var(--text-secondary);
   }
@@ -280,20 +291,20 @@ html, body {
   font-size: 14px;
   cursor: pointer;
   transition: all 0.2s;
-  
+
   &-primary {
     background: var(--primary);
     color: white;
-    
+
     &:hover {
       background: var(--primary-hover);
     }
   }
-  
+
   &-secondary {
     background: var(--bg-tertiary);
     color: var(--text-primary);
-    
+
     &:hover {
       background: var(--border-color);
     }
@@ -306,4 +317,61 @@ html, body {
   border-radius: 16px;
   box-shadow: var(--shadow-sm);
   padding: 16px;
+}
+
+// 全局 Switch 开关样式
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+
+  input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .switch-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: var(--bg-tertiary);
+    transition: 0.3s;
+    border-radius: 24px;
+    border: 1px solid var(--border-color);
+
+    &::before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 2px;
+      bottom: 2px;
+      background-color: var(--text-tertiary);
+      transition: 0.3s;
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    }
+  }
+
+  input:checked+.switch-slider {
+    background-color: var(--primary);
+    border-color: var(--primary);
+
+    &::before {
+      transform: translateX(20px);
+      background-color: #ffffff;
+    }
+  }
+
+  // 禁用状态
+  input:disabled+.switch-slider {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 }

@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
 import { Search, Download, FolderOpen, RefreshCw, Check, Calendar, FileJson, FileText, Table, Loader2, X, ChevronDown, ChevronLeft, ChevronRight, FileSpreadsheet, Database, FileCode, CheckCircle, XCircle, ExternalLink } from 'lucide-react'
 import * as configService from '../services/config'
 import './ExportPage.scss'
@@ -12,16 +13,20 @@ interface ChatSession {
 }
 
 interface ExportOptions {
-  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'html' | 'txt' | 'excel' | 'sql'
+  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'html' | 'txt' | 'excel' | 'weclone' | 'sql'
   dateRange: { start: Date; end: Date } | null
   useAllTime: boolean
   exportAvatars: boolean
   exportMedia: boolean
   exportImages: boolean
   exportVoices: boolean
+  exportVideos: boolean
   exportEmojis: boolean
   exportVoiceAsText: boolean
   excelCompactColumns: boolean
+  txtColumns: string[]
+  displayNamePreference: 'group-nickname' | 'remark' | 'nickname'
+  exportConcurrency: number
 }
 
 interface ExportResult {
@@ -31,7 +36,11 @@ interface ExportResult {
   error?: string
 }
 
+type SessionLayout = 'shared' | 'per-session'
+
 function ExportPage() {
+  const location = useLocation()
+  const defaultTxtColumns = ['index', 'time', 'senderRole', 'messageType', 'content']
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [filteredSessions, setFilteredSessions] = useState<ChatSession[]>([])
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set())
@@ -39,11 +48,37 @@ function ExportPage() {
   const [searchKeyword, setSearchKeyword] = useState('')
   const [exportFolder, setExportFolder] = useState<string>('')
   const [isExporting, setIsExporting] = useState(false)
-  const [exportProgress, setExportProgress] = useState({ current: 0, total: 0, currentName: '' })
+  const [exportProgress, setExportProgress] = useState({ current: 0, total: 0, currentName: '', phaseLabel: '', phaseProgress: 0, phaseTotal: 0 })
   const [exportResult, setExportResult] = useState<ExportResult | null>(null)
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [calendarDate, setCalendarDate] = useState(new Date())
   const [selectingStart, setSelectingStart] = useState(true)
+  const [showMediaLayoutPrompt, setShowMediaLayoutPrompt] = useState(false)
+  const [showDisplayNameSelect, setShowDisplayNameSelect] = useState(false)
+  const [showPreExportDialog, setShowPreExportDialog] = useState(false)
+  const [preExportStats, setPreExportStats] = useState<{
+    totalMessages: number; voiceMessages: number; cachedVoiceCount: number;
+    needTranscribeCount: number; mediaMessages: number; estimatedSeconds: number
+  } | null>(null)
+  const [isLoadingStats, setIsLoadingStats] = useState(false)
+  const [pendingLayout, setPendingLayout] = useState<SessionLayout>('shared')
+  const exportStartTime = useRef<number>(0)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const displayNameDropdownRef = useRef<HTMLDivElement>(null)
+  const preselectAppliedRef = useRef(false)
+  const statsRequestIdRef = useRef(0)
+
+  const preselectSessionIds = useMemo(() => {
+    const state = location.state as { preselectSessionIds?: unknown; preselectSessionId?: unknown } | null
+    const rawList = Array.isArray(state?.preselectSessionIds)
+      ? state?.preselectSessionIds
+      : (typeof state?.preselectSessionId === 'string' ? [state.preselectSessionId] : [])
+
+    return rawList
+      .filter((item): item is string => typeof item === 'string')
+      .map(item => item.trim())
+      .filter(Boolean)
+  }, [location.state])
 
   const [options, setOptions] = useState<ExportOptions>({
     format: 'excel',
@@ -56,9 +91,13 @@ function ExportPage() {
     exportMedia: false,
     exportImages: true,
     exportVoices: true,
+    exportVideos: true,
     exportEmojis: true,
-    exportVoiceAsText: true,
-    excelCompactColumns: true
+    exportVoiceAsText: false,
+    excelCompactColumns: true,
+    txtColumns: defaultTxtColumns,
+    displayNamePreference: 'remark',
+    exportConcurrency: 2
   })
 
   const buildDateRangeFromPreset = (preset: string) => {
@@ -122,17 +161,22 @@ function ExportPage() {
         savedRange,
         savedMedia,
         savedVoiceAsText,
-        savedExcelCompactColumns
+        savedExcelCompactColumns,
+        savedTxtColumns,
+        savedConcurrency
       ] = await Promise.all([
         configService.getExportDefaultFormat(),
         configService.getExportDefaultDateRange(),
         configService.getExportDefaultMedia(),
         configService.getExportDefaultVoiceAsText(),
-        configService.getExportDefaultExcelCompactColumns()
+        configService.getExportDefaultExcelCompactColumns(),
+        configService.getExportDefaultTxtColumns(),
+        configService.getExportDefaultConcurrency()
       ])
 
       const preset = savedRange || 'today'
       const rangeDefaults = buildDateRangeFromPreset(preset)
+      const txtColumns = savedTxtColumns && savedTxtColumns.length > 0 ? savedTxtColumns : defaultTxtColumns
 
       setOptions((prev) => ({
         ...prev,
@@ -140,8 +184,10 @@ function ExportPage() {
         useAllTime: rangeDefaults.useAllTime,
         dateRange: rangeDefaults.dateRange,
         exportMedia: savedMedia ?? false,
-        exportVoiceAsText: savedVoiceAsText ?? true,
-        excelCompactColumns: savedExcelCompactColumns ?? true
+        exportVoiceAsText: savedVoiceAsText ?? false,
+        excelCompactColumns: savedExcelCompactColumns ?? true,
+        txtColumns,
+        exportConcurrency: savedConcurrency ?? 2
       }))
     } catch (e) {
       console.error('加载导出默认设置失败:', e)
@@ -153,6 +199,73 @@ function ExportPage() {
     loadExportPath()
     loadExportDefaults()
   }, [loadSessions, loadExportPath, loadExportDefaults])
+
+  useEffect(() => {
+    preselectAppliedRef.current = false
+  }, [location.key, preselectSessionIds])
+
+  useEffect(() => {
+    if (preselectAppliedRef.current) return
+    if (sessions.length === 0 || preselectSessionIds.length === 0) return
+
+    const exists = new Set(sessions.map(session => session.username))
+    const matched = preselectSessionIds.filter(id => exists.has(id))
+    preselectAppliedRef.current = true
+
+    if (matched.length > 0) {
+      setSelectedSessions(new Set(matched))
+      setSearchKeyword('')
+    }
+  }, [sessions, preselectSessionIds])
+
+  useEffect(() => {
+    const handleChange = () => {
+      setSelectedSessions(new Set())
+      setSearchKeyword('')
+      setExportResult(null)
+      setSessions([])
+      setFilteredSessions([])
+      loadSessions()
+    }
+    window.addEventListener('wxid-changed', handleChange as EventListener)
+    return () => window.removeEventListener('wxid-changed', handleChange as EventListener)
+  }, [loadSessions])
+
+  useEffect(() => {
+    const removeListener = window.electronAPI.export.onProgress?.((payload: { current: number; total: number; currentSession: string; phase: string; phaseProgress?: number; phaseTotal?: number; phaseLabel?: string }) => {
+      setExportProgress({
+        current: payload.current,
+        total: payload.total,
+        currentName: payload.currentSession,
+        phaseLabel: payload.phaseLabel || '',
+        phaseProgress: payload.phaseProgress || 0,
+        phaseTotal: payload.phaseTotal || 0
+      })
+    })
+    return () => {
+      removeListener?.()
+    }
+  }, [])
+
+  // 导出计时器
+  useEffect(() => {
+    if (!isExporting) return
+    const timer = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - exportStartTime.current) / 1000))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [isExporting])
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (showDisplayNameSelect && displayNameDropdownRef.current && !displayNameDropdownRef.current.contains(target)) {
+        setShowDisplayNameSelect(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showDisplayNameSelect])
 
   useEffect(() => {
     if (!searchKeyword.trim()) {
@@ -193,18 +306,37 @@ function ExportPage() {
     return date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
   }
 
+  const handleFormatChange = (format: ExportOptions['format']) => {
+    setOptions((prev) => {
+      const next = { ...prev, format }
+      if (format === 'html') {
+        return {
+          ...next,
+          exportMedia: true,
+          exportImages: true,
+          exportVoices: true,
+          exportVideos: true,
+          exportEmojis: true
+        }
+      }
+      return next
+    })
+  }
+
   const openExportFolder = async () => {
     if (exportFolder) {
       await window.electronAPI.shell.openPath(exportFolder)
     }
   }
 
-  const startExport = async () => {
+  const runExport = async (sessionLayout: SessionLayout) => {
     if (selectedSessions.size === 0 || !exportFolder) return
 
     setIsExporting(true)
-    setExportProgress({ current: 0, total: selectedSessions.size, currentName: '' })
+    setExportProgress({ current: 0, total: selectedSessions.size, currentName: '', phaseLabel: '', phaseProgress: 0, phaseTotal: 0 })
     setExportResult(null)
+    exportStartTime.current = Date.now()
+    setElapsedSeconds(0)
 
     try {
       const sessionList = Array.from(selectedSessions)
@@ -214,17 +346,22 @@ function ExportPage() {
         exportMedia: options.exportMedia,
         exportImages: options.exportMedia && options.exportImages,
         exportVoices: options.exportMedia && options.exportVoices,
+        exportVideos: options.exportMedia && options.exportVideos,
         exportEmojis: options.exportMedia && options.exportEmojis,
-        exportVoiceAsText: options.exportVoiceAsText,  // 独立于 exportMedia
+        exportVoiceAsText: options.exportVoiceAsText,  // 即使不导出媒体，也可以导出语音转文字内容
         excelCompactColumns: options.excelCompactColumns,
+        txtColumns: options.txtColumns,
+        displayNamePreference: options.displayNamePreference,
+        exportConcurrency: options.exportConcurrency,
+        sessionLayout,
         dateRange: options.useAllTime ? null : options.dateRange ? {
           start: Math.floor(options.dateRange.start.getTime() / 1000),
-          // 将结束日期设置为当天的 23:59:59,以包含当天的所有消息
+          // 将结束日期设置为当天的 23:59:59，确保包含当天的所有记录
           end: Math.floor(new Date(options.dateRange.end.getFullYear(), options.dateRange.end.getMonth(), options.dateRange.end.getDate(), 23, 59, 59).getTime() / 1000)
         } : null
       }
 
-      if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel') {
+      if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel' || options.format === 'txt' || options.format === 'html' || options.format === 'weclone') {
         const result = await window.electronAPI.export.exportSessions(
           sessionList,
           exportFolder,
@@ -232,14 +369,65 @@ function ExportPage() {
         )
         setExportResult(result)
       } else {
-        setExportResult({ success: false, error: `${options.format.toUpperCase()} 格式导出功能开发中...` })
+        setExportResult({ success: false, error: `${options.format.toUpperCase()} 格式目前暂未实现，请选择其他格式。` })
       }
     } catch (e) {
-      console.error('导出失败:', e)
+      console.error('导出过程中发生异常:', e)
       setExportResult({ success: false, error: String(e) })
     } finally {
       setIsExporting(false)
     }
+  }
+
+  const startExport = async () => {
+    if (selectedSessions.size === 0 || !exportFolder) return
+
+    // 先获取预估统计
+    const requestId = ++statsRequestIdRef.current
+    setIsLoadingStats(true)
+    setPreExportStats(null)
+    setShowPreExportDialog(true)
+    try {
+      const sessionList = Array.from(selectedSessions)
+      const exportOptions = {
+        format: options.format,
+        exportVoiceAsText: options.exportVoiceAsText,
+        exportMedia: options.exportMedia,
+        exportImages: options.exportMedia && options.exportImages,
+        exportVoices: options.exportMedia && options.exportVoices,
+        exportVideos: options.exportMedia && options.exportVideos,
+        exportEmojis: options.exportMedia && options.exportEmojis,
+        dateRange: options.useAllTime ? null : options.dateRange ? {
+          start: Math.floor(options.dateRange.start.getTime() / 1000),
+          end: Math.floor(new Date(options.dateRange.end.getFullYear(), options.dateRange.end.getMonth(), options.dateRange.end.getDate(), 23, 59, 59).getTime() / 1000)
+        } : null
+      }
+      const stats = await window.electronAPI.export.getExportStats(sessionList, exportOptions)
+      if (statsRequestIdRef.current !== requestId) return
+      setPreExportStats(stats)
+    } catch (e) {
+      console.error('获取导出统计失败:', e)
+      if (statsRequestIdRef.current !== requestId) return
+      setPreExportStats(null)
+    } finally {
+      if (statsRequestIdRef.current !== requestId) return
+      setIsLoadingStats(false)
+    }
+  }
+
+  const confirmExport = () => {
+    statsRequestIdRef.current++
+    setIsLoadingStats(false)
+    setShowPreExportDialog(false)
+    setPreExportStats(null)
+
+    if (options.exportMedia && selectedSessions.size > 1) {
+      setShowMediaLayoutPrompt(true)
+      return
+    }
+
+    const layout: SessionLayout = options.exportMedia ? 'per-session' : 'shared'
+    runExport(layout)
   }
 
   const getDaysInMonth = (date: Date) => {
@@ -333,8 +521,28 @@ function ExportPage() {
     { value: 'html', label: 'HTML', icon: FileText, desc: '网页格式，可直接浏览' },
     { value: 'txt', label: 'TXT', icon: Table, desc: '纯文本，通用格式' },
     { value: 'excel', label: 'Excel', icon: FileSpreadsheet, desc: '电子表格，适合统计分析' },
+    { value: 'weclone', label: 'WeClone CSV', icon: Table, desc: 'WeClone 兼容字段格式（CSV）' },
     { value: 'sql', label: 'PostgreSQL', icon: Database, desc: '数据库脚本，便于导入到数据库' }
   ]
+  const displayNameOptions = [
+    {
+      value: 'group-nickname',
+      label: '群昵称优先',
+      desc: '仅群聊有效，私聊显示备注/昵称'
+    },
+    {
+      value: 'remark',
+      label: '备注优先',
+      desc: '有备注显示备注，否则显示昵称'
+    },
+    {
+      value: 'nickname',
+      label: '微信昵称',
+      desc: '始终显示微信昵称'
+    }
+  ]
+  const displayNameOption = displayNameOptions.find(option => option.value === options.displayNamePreference)
+  const displayNameLabel = displayNameOption?.label || '备注优先'
 
   return (
     <div className="export-page">
@@ -418,7 +626,7 @@ function ExportPage() {
                 <div
                   key={fmt.value}
                   className={`format-card ${options.format === fmt.value ? 'active' : ''}`}
-                  onClick={() => setOptions({ ...options, format: fmt.value as any })}
+                  onClick={() => handleFormatChange(fmt.value as ExportOptions['format'])}
                 >
                   <fmt.icon size={24} />
                   <span className="format-label">{fmt.label}</span>
@@ -430,28 +638,79 @@ function ExportPage() {
 
           <div className="setting-section">
             <h3>时间范围</h3>
-            <div className="time-options">
-              <label className="checkbox-item">
-                <input
-                  type="checkbox"
-                  checked={options.useAllTime}
-                  onChange={e => setOptions({ ...options, useAllTime: e.target.checked })}
-                />
-                <span>导出全部时间</span>
-              </label>
-              {!options.useAllTime && options.dateRange && (
-                <div className="date-range" onClick={() => setShowDatePicker(true)}>
-                  <Calendar size={16} />
-                  <span>{formatDate(options.dateRange.start)} - {formatDate(options.dateRange.end)}</span>
-                  <ChevronDown size={14} />
+            <p className="setting-subtitle">选择要导出的消息时间区间</p>
+            <div className="media-options-card">
+              <div className="media-switch-row">
+                <div className="media-switch-info">
+                  <span className="media-switch-title">导出全部时间</span>
+                  <span className="media-switch-desc">关闭此项以选择特定的起止日期</span>
                 </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={options.useAllTime}
+                    onChange={e => setOptions({ ...options, useAllTime: e.target.checked })}
+                  />
+                  <span className="switch-slider"></span>
+                </label>
+              </div>
+
+              {!options.useAllTime && options.dateRange && (
+                <>
+                  <div className="media-option-divider"></div>
+                  <div className="time-range-picker-item" onClick={() => setShowDatePicker(true)}>
+                    <div className="time-picker-info">
+                      <Calendar size={16} />
+                      <span>{formatDate(options.dateRange.start)} - {formatDate(options.dateRange.end)}</span>
+                    </div>
+                    <ChevronDown size={14} />
+                  </div>
+                </>
               )}
             </div>
           </div>
 
+          {/* 发送者名称显示偏好 */}
+          {(options.format === 'html' || options.format === 'json' || options.format === 'txt') && (
+            <div className="setting-section">
+              <h3>发送者名称显示</h3>
+              <p className="setting-subtitle">选择导出时优先显示的名称</p>
+              <div className="select-field" ref={displayNameDropdownRef}>
+                <button
+                  type="button"
+                  className={`select-trigger ${showDisplayNameSelect ? 'open' : ''}`}
+                  onClick={() => setShowDisplayNameSelect(!showDisplayNameSelect)}
+                >
+                  <span className="select-value">{displayNameLabel}</span>
+                  <ChevronDown size={16} />
+                </button>
+                {showDisplayNameSelect && (
+                  <div className="select-dropdown">
+                    {displayNameOptions.map(option => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={`select-option ${options.displayNamePreference === option.value ? 'active' : ''}`}
+                        onClick={() => {
+                          setOptions({
+                            ...options,
+                            displayNamePreference: option.value as ExportOptions['displayNamePreference']
+                          })
+                          setShowDisplayNameSelect(false)
+                        }}
+                      >
+                        <span className="option-label">{option.label}</span>
+                        <span className="option-desc">{option.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           <div className="setting-section">
             <h3>媒体文件</h3>
-            <p className="setting-subtitle">导出图片/语音/表情并在记录内写入相对路径</p>
+            <p className="setting-subtitle">导出图片/语音/视频/表情并在记录内写入相对路径</p>
             <div className="media-options-card">
               <div className="media-switch-row">
                 <div className="media-switch-info">
@@ -464,7 +723,7 @@ function ExportPage() {
                     checked={options.exportMedia}
                     onChange={e => setOptions({ ...options, exportMedia: e.target.checked })}
                   />
-                  <span className="slider"></span>
+                  <span className="switch-slider"></span>
                 </label>
               </div>
 
@@ -503,12 +762,27 @@ function ExportPage() {
               <label className="media-checkbox-row">
                 <div className="media-checkbox-info">
                   <span className="media-checkbox-title">语音转文字</span>
-                  <span className="media-checkbox-desc">将语音消息转换为文字导出（不导出语音文件）</span>
+                  <span className="media-checkbox-desc">将语音消息转换为文字导出</span>
                 </div>
                 <input
                   type="checkbox"
                   checked={options.exportVoiceAsText}
                   onChange={e => setOptions({ ...options, exportVoiceAsText: e.target.checked })}
+                />
+              </label>
+
+              <div className="media-option-divider"></div>
+
+              <label className={`media-checkbox-row ${!options.exportMedia ? 'disabled' : ''}`}>
+                <div className="media-checkbox-info">
+                  <span className="media-checkbox-title">视频</span>
+                  <span className="media-checkbox-desc">直接复制视频文件到导出目录</span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={options.exportVideos}
+                  disabled={!options.exportMedia}
+                  onChange={e => setOptions({ ...options, exportVideos: e.target.checked })}
                 />
               </label>
 
@@ -544,7 +818,7 @@ function ExportPage() {
                     checked={options.exportAvatars}
                     onChange={e => setOptions({ ...options, exportAvatars: e.target.checked })}
                   />
-                  <span className="slider"></span>
+                  <span className="switch-slider"></span>
                 </label>
               </div>
             </div>
@@ -600,6 +874,108 @@ function ExportPage() {
         </div>
       </div>
 
+      {/* 媒体导出布局选择弹窗 */}
+      {showMediaLayoutPrompt && (
+        <div className="export-overlay" onClick={() => setShowMediaLayoutPrompt(false)}>
+          <div className="export-layout-modal" onClick={e => e.stopPropagation()}>
+            <h3>导出文件夹布局</h3>
+            <p className="layout-subtitle">检测到同时导出多个会话并包含媒体文件，请选择存放方式：</p>
+            <div className="layout-options">
+              <button
+                className="layout-option-btn primary"
+                onClick={() => {
+                  setShowMediaLayoutPrompt(false)
+                  runExport('shared')
+                }}
+              >
+                <span className="layout-title">所有会话在同一文件夹</span>
+                <span className="layout-desc">媒体会按会话名归档到 media 子目录</span>
+              </button>
+              <button
+                className="layout-option-btn"
+                onClick={() => {
+                  setShowMediaLayoutPrompt(false)
+                  runExport('per-session')
+                }}
+              >
+                <span className="layout-title">每个会话一个文件夹</span>
+                <span className="layout-desc">每个会话单独包含导出文件和媒体</span>
+              </button>
+            </div>
+            <div className="layout-actions">
+              <button className="layout-cancel-btn" onClick={() => setShowMediaLayoutPrompt(false)}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 导出前预估弹窗 */}
+      {showPreExportDialog && (
+        <div className="export-overlay">
+          <div className="export-layout-modal" onClick={e => e.stopPropagation()}>
+            <h3>导出预估</h3>
+            {isLoadingStats ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '24px 0', justifyContent: 'center' }}>
+                <Loader2 size={20} className="spin" />
+                <span style={{ fontSize: 14, color: 'var(--text-secondary)' }}>正在统计消息，可直接点击“直接导出”跳过等待</span>
+              </div>
+            ) : preExportStats ? (
+              <div style={{ padding: '12px 0' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 24px', fontSize: 14 }}>
+                  <div>
+                    <span style={{ color: 'var(--text-secondary)' }}>会话数</span>
+                    <div style={{ fontWeight: 600, fontSize: 18, marginTop: 2 }}>{selectedSessions.size}</div>
+                  </div>
+                  <div>
+                    <span style={{ color: 'var(--text-secondary)' }}>总消息</span>
+                    <div style={{ fontWeight: 600, fontSize: 18, marginTop: 2 }}>{preExportStats.totalMessages.toLocaleString()}</div>
+                  </div>
+                  {options.exportVoiceAsText && preExportStats.voiceMessages > 0 && (
+                    <>
+                      <div>
+                        <span style={{ color: 'var(--text-secondary)' }}>语音消息</span>
+                        <div style={{ fontWeight: 600, fontSize: 18, marginTop: 2 }}>{preExportStats.voiceMessages}</div>
+                      </div>
+                      <div>
+                        <span style={{ color: 'var(--text-secondary)' }}>已有缓存</span>
+                        <div style={{ fontWeight: 600, fontSize: 18, marginTop: 2, color: 'var(--primary)' }}>{preExportStats.cachedVoiceCount}</div>
+                      </div>
+                    </>
+                  )}
+                </div>
+                {options.exportVoiceAsText && preExportStats.needTranscribeCount > 0 && (
+                  <div style={{ marginTop: 16, padding: '10px 12px', background: 'var(--bg-tertiary)', borderRadius: 8, fontSize: 13 }}>
+                    <span style={{ color: 'var(--text-warning, #e6a23c)' }}>⚠</span>
+                    {' '}需要转写 <b>{preExportStats.needTranscribeCount}</b> 条语音，预计耗时约 <b>{preExportStats.estimatedSeconds > 60
+                      ? `${Math.round(preExportStats.estimatedSeconds / 60)} 分钟`
+                      : `${preExportStats.estimatedSeconds} 秒`
+                    }</b>
+                  </div>
+                )}
+                {options.exportVoiceAsText && preExportStats.voiceMessages > 0 && preExportStats.needTranscribeCount === 0 && (
+                  <div style={{ marginTop: 16, padding: '10px 12px', background: 'var(--bg-tertiary)', borderRadius: 8, fontSize: 13 }}>
+                    <span style={{ color: 'var(--text-success, #67c23a)' }}>✓</span>
+                    {' '}所有 {preExportStats.voiceMessages} 条语音已有转写缓存，无需重新转写
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p style={{ fontSize: 14, color: 'var(--text-secondary)', padding: '16px 0' }}>统计信息获取失败，仍可继续导出</p>
+            )}
+            <div className="layout-actions" style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8 }}>
+              <button className="layout-cancel-btn" onClick={() => { statsRequestIdRef.current++; setIsLoadingStats(false); setShowPreExportDialog(false); setPreExportStats(null) }}>
+                取消
+              </button>
+              <button className="layout-option-btn primary" onClick={confirmExport}>
+                <span className="layout-title">{isLoadingStats ? '直接导出' : '开始导出'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 导出进度弹窗 */}
       {isExporting && (
         <div className="export-overlay">
@@ -609,13 +985,31 @@ function ExportPage() {
             </div>
             <h3>正在导出</h3>
             <p className="progress-text">{exportProgress.currentName}</p>
+            {exportProgress.phaseLabel && (
+              <p className="progress-phase-label" style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '4px 0 8px' }}>
+                {exportProgress.phaseLabel}
+              </p>
+            )}
+            {exportProgress.phaseTotal > 0 && (
+              <div className="progress-bar" style={{ marginBottom: 8 }}>
+                <div
+                  className="progress-fill"
+                  style={{ width: `${(exportProgress.phaseProgress / exportProgress.phaseTotal) * 100}%`, background: 'var(--primary-light, #79bbff)' }}
+                />
+              </div>
+            )}
             <div className="progress-bar">
               <div
                 className="progress-fill"
-                style={{ width: `${(exportProgress.current / exportProgress.total) * 100}%` }}
+                style={{ width: `${exportProgress.total > 0 ? (exportProgress.current / exportProgress.total) * 100 : 0}%` }}
               />
             </div>
-            <p className="progress-count">{exportProgress.current} / {exportProgress.total}</p>
+            <p className="progress-count">
+              {exportProgress.current} / {exportProgress.total} 个会话
+              <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
+                {elapsedSeconds > 0 && `已用 ${elapsedSeconds >= 60 ? `${Math.floor(elapsedSeconds / 60)}分${elapsedSeconds % 60}秒` : `${elapsedSeconds}秒`}`}
+              </span>
+            </p>
           </div>
         </div>
       )}
@@ -698,7 +1092,7 @@ function ExportPage() {
               >
                 <span className="date-label">开始日期</span>
                 <span className="date-value">
-                  {options.dateRange?.start.toLocaleDateString('zh-CN', {
+                  {options.dateRange?.start?.toLocaleDateString('zh-CN', {
                     year: 'numeric',
                     month: '2-digit',
                     day: '2-digit'
@@ -712,7 +1106,7 @@ function ExportPage() {
               >
                 <span className="date-label">结束日期</span>
                 <span className="date-value">
-                  {options.dateRange?.end.toLocaleDateString('zh-CN', {
+                  {options.dateRange?.end?.toLocaleDateString('zh-CN', {
                     year: 'numeric',
                     month: '2-digit',
                     day: '2-digit'
@@ -750,9 +1144,9 @@ function ExportPage() {
                   }
 
                   const currentDate = new Date(calendarDate.getFullYear(), calendarDate.getMonth(), day)
-                  const isStart = options.dateRange?.start.toDateString() === currentDate.toDateString()
-                  const isEnd = options.dateRange?.end.toDateString() === currentDate.toDateString()
-                  const isInRange = options.dateRange && currentDate >= options.dateRange.start && currentDate <= options.dateRange.end
+                  const isStart = options.dateRange?.start?.toDateString() === currentDate.toDateString()
+                  const isEnd = options.dateRange?.end?.toDateString() === currentDate.toDateString()
+                  const isInRange = options.dateRange?.start && options.dateRange?.end && currentDate >= options.dateRange.start && currentDate <= options.dateRange.end
                   const today = new Date()
                   today.setHours(0, 0, 0, 0)
                   const isFuture = currentDate > today

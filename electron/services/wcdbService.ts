@@ -23,6 +23,7 @@ export class WcdbService {
   private resourcesPath: string | null = null
   private userDataPath: string | null = null
   private logEnabled = false
+  private monitorListener: ((type: string, json: string) => void) | null = null
 
   constructor() {
     this.initWorker()
@@ -47,8 +48,16 @@ export class WcdbService {
     try {
       this.worker = new Worker(finalPath)
 
-      this.worker.on('message', (msg: WorkerMessage) => {
-        const { id, result, error } = msg
+      this.worker.on('message', (msg: any) => {
+        const { id, result, error, type, payload } = msg
+
+        if (type === 'monitor') {
+          if (this.monitorListener) {
+            this.monitorListener(payload.type, payload.json)
+          }
+          return
+        }
+
         const p = this.pending.get(id)
         if (p) {
           this.pending.delete(id)
@@ -58,12 +67,24 @@ export class WcdbService {
       })
 
       this.worker.on('error', (err) => {
-        // Worker error
+        // Worker 发生错误，需要 reject 所有 pending promises
+        console.error('WCDB Worker 错误:', err)
+        const errorMsg = err instanceof Error ? err.message : String(err)
+        for (const [id, p] of this.pending) {
+          p.reject(new Error(`Worker 错误: ${errorMsg}`))
+        }
+        this.pending.clear()
       })
 
       this.worker.on('exit', (code) => {
+        // Worker 退出，需要 reject 所有 pending promises
         if (code !== 0) {
-          // Worker exited with error
+          console.error('WCDB Worker 异常退出，退出码:', code)
+          const errorMsg = `Worker 异常退出 (退出码: ${code})。可能是 DLL 加载失败，请检查是否安装了 Visual C++ Redistributable。`
+          for (const [id, p] of this.pending) {
+            p.reject(new Error(errorMsg))
+          }
+          this.pending.clear()
         }
         this.worker = null
       })
@@ -108,6 +129,15 @@ export class WcdbService {
   setLogEnabled(enabled: boolean): void {
     this.logEnabled = enabled
     this.callWorker('setLogEnabled', { enabled }).catch(() => { })
+  }
+
+  /**
+   * 设置数据库监控回调
+   */
+  setMonitor(callback: (type: string, json: string) => void): void {
+    this.monitorListener = callback;
+    // Notify worker to enable monitor
+    this.callWorker('setMonitor').catch(() => { });
   }
 
   /**
@@ -176,6 +206,13 @@ export class WcdbService {
   }
 
   /**
+   * 获取新消息（增量刷新）
+   */
+  async getNewMessages(sessionId: string, minTime: number, limit: number = 1000): Promise<{ success: boolean; messages?: any[]; error?: string }> {
+    return this.callWorker('getNewMessages', { sessionId, minTime, limit })
+  }
+
+  /**
    * 获取消息总数
    */
   async getMessageCount(sessionId: string): Promise<{ success: boolean; count?: number; error?: string }> {
@@ -217,6 +254,11 @@ export class WcdbService {
     return this.callWorker('getGroupMembers', { chatroomId })
   }
 
+  // 获取群成员群名片昵称
+  async getGroupNicknames(chatroomId: string): Promise<{ success: boolean; nicknames?: Record<string, string>; error?: string }> {
+    return this.callWorker('getGroupNicknames', { chatroomId })
+  }
+
   /**
    * 获取消息表列表
    */
@@ -229,6 +271,10 @@ export class WcdbService {
    */
   async getMessageTableStats(sessionId: string): Promise<{ success: boolean; tables?: any[]; error?: string }> {
     return this.callWorker('getMessageTableStats', { sessionId })
+  }
+
+  async getMessageDates(sessionId: string): Promise<{ success: boolean; dates?: string[]; error?: string }> {
+    return this.callWorker('getMessageDates', { sessionId })
   }
 
   /**
@@ -271,6 +317,13 @@ export class WcdbService {
    */
   async getAnnualReportExtras(sessionIds: string[], beginTimestamp: number, endTimestamp: number, peakDayBegin: number, peakDayEnd: number): Promise<{ success: boolean; data?: any; error?: string }> {
     return this.callWorker('getAnnualReportExtras', { sessionIds, beginTimestamp, endTimestamp, peakDayBegin, peakDayEnd })
+  }
+
+  /**
+   * 获取双人报告统计数据
+   */
+  async getDualReportStats(sessionId: string, beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; data?: any; error?: string }> {
+    return this.callWorker('getDualReportStats', { sessionId, beginTimestamp, endTimestamp })
   }
 
   /**
@@ -349,6 +402,50 @@ export class WcdbService {
   async getVoiceData(sessionId: string, createTime: number, candidates: string[], localId: number = 0, svrId: string | number = 0): Promise<{ success: boolean; hex?: string; error?: string }> {
     return this.callWorker('getVoiceData', { sessionId, createTime, candidates, localId, svrId })
   }
+
+  /**
+   * 获取朋友圈
+   */
+  async getSnsTimeline(limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number): Promise<{ success: boolean; timeline?: any[]; error?: string }> {
+    return this.callWorker('getSnsTimeline', { limit, offset, usernames, keyword, startTime, endTime })
+  }
+
+  /**
+   * 获取朋友圈年度统计
+   */
+  async getSnsAnnualStats(beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; data?: any; error?: string }> {
+    return this.callWorker('getSnsAnnualStats', { beginTimestamp, endTimestamp })
+  }
+
+  /**
+   * 获取 DLL 内部日志
+   */
+  async getLogs(): Promise<{ success: boolean; logs?: string[]; error?: string }> {
+    return this.callWorker('getLogs')
+  }
+
+  /**
+   * 验证 Windows Hello
+   */
+  async verifyUser(message: string, hwnd?: string): Promise<{ success: boolean; error?: string }> {
+    return this.callWorker('verifyUser', { message, hwnd })
+  }
+
+  /**
+   * 修改消息内容
+   */
+  async updateMessage(sessionId: string, localId: number, createTime: number, newContent: string): Promise<{ success: boolean; error?: string }> {
+    return this.callWorker('updateMessage', { sessionId, localId, createTime, newContent })
+  }
+
+  /**
+   * 删除消息
+   */
+  async deleteMessage(sessionId: string, localId: number, createTime: number, dbPathHint?: string): Promise<{ success: boolean; error?: string }> {
+    return this.callWorker('deleteMessage', { sessionId, localId, createTime, dbPathHint })
+  }
+
+
 
 }
 

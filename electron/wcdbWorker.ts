@@ -19,6 +19,16 @@ if (parentPort) {
                     core.setLogEnabled(payload.enabled)
                     result = { success: true }
                     break
+                case 'setMonitor':
+                    core.setMonitor((type, json) => {
+                        parentPort!.postMessage({
+                            id: -1,
+                            type: 'monitor',
+                            payload: { type, json }
+                        })
+                    })
+                    result = { success: true }
+                    break
                 case 'testConnection':
                     result = await core.testConnection(payload.dbPath, payload.hexKey, payload.wxid)
                     break
@@ -38,6 +48,9 @@ if (parentPort) {
                 case 'getMessages':
                     result = await core.getMessages(payload.sessionId, payload.limit, payload.offset)
                     break
+                case 'getNewMessages':
+                    result = await core.getNewMessages(payload.sessionId, payload.minTime, payload.limit)
+                    break
                 case 'getMessageCount':
                     result = await core.getMessageCount(payload.sessionId)
                     break
@@ -56,11 +69,17 @@ if (parentPort) {
                 case 'getGroupMembers':
                     result = await core.getGroupMembers(payload.chatroomId)
                     break
+                case 'getGroupNicknames':
+                    result = await core.getGroupNicknames(payload.chatroomId)
+                    break
                 case 'getMessageTables':
                     result = await core.getMessageTables(payload.sessionId)
                     break
                 case 'getMessageTableStats':
                     result = await core.getMessageTableStats(payload.sessionId)
+                    break
+                case 'getMessageDates':
+                    result = await core.getMessageDates(payload.sessionId)
                     break
                 case 'getMessageMeta':
                     result = await core.getMessageMeta(payload.dbPath, payload.tableName, payload.limit, payload.offset)
@@ -79,6 +98,9 @@ if (parentPort) {
                     break
                 case 'getAnnualReportExtras':
                     result = await core.getAnnualReportExtras(payload.sessionIds, payload.beginTimestamp, payload.endTimestamp, payload.peakDayBegin, payload.peakDayEnd)
+                    break
+                case 'getDualReportStats':
+                    result = await core.getDualReportStats(payload.sessionId, payload.beginTimestamp, payload.endTimestamp)
                     break
                 case 'getGroupStats':
                     result = await core.getGroupStats(payload.chatroomId, payload.beginTimestamp, payload.endTimestamp)
@@ -116,6 +138,25 @@ if (parentPort) {
                         console.error('[wcdbWorker] getVoiceData failed:', result.error)
                     }
                     break
+                case 'getSnsTimeline':
+                    result = await core.getSnsTimeline(payload.limit, payload.offset, payload.usernames, payload.keyword, payload.startTime, payload.endTime)
+                    break
+                case 'getSnsAnnualStats':
+                    result = await core.getSnsAnnualStats(payload.beginTimestamp, payload.endTimestamp)
+                    break
+                case 'getLogs':
+                    result = await core.getLogs()
+                    break
+                case 'verifyUser':
+                    result = await core.verifyUser(payload.message, payload.hwnd)
+                    break
+                case 'updateMessage':
+                    result = await core.updateMessage(payload.sessionId, payload.localId, payload.createTime, payload.newContent)
+                    break
+                case 'deleteMessage':
+                    result = await core.deleteMessage(payload.sessionId, payload.localId, payload.createTime, payload.dbPathHint)
+                    break
+
                 default:
                     result = { success: false, error: `Unknown method: ${type}` }
             }

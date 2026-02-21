@@ -21,7 +21,7 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.12
           cache: 'npm'
 
       - name: Install Dependencies
@@ -39,59 +39,23 @@ jobs:
           npx tsc
           npx vite build
 
-      - name: Create Changelog Config
-        shell: bash
-        run: |
-          cat <<EOF > changelog_config.json
-          {
-            "template": "# ${{ github.ref_name }} 更新日志\n\n{{CHANGELOG}}\n\n---\n> 此更新由系统自动构建",
-            "categories": [
-              {
-                "title": "##  新功能",
-                "filter": { "pattern": "^feat", "flags": "i" }
-              },
-              {
-                "title": "##  修复",
-                "filter": { "pattern": "^fix", "flags": "i" }
-              },
-              {
-                "title": "##  性能与维护",
-                "filter": { "pattern": "^(chore|docs|perf|refactor|ci|style|test)", "flags": "i" }
-              },
-              {
-                "title": "##  其他改动",
-                "filter": { "pattern": ".*", "flags": "i" }
-              }
-            ],
-            "ignore_labels": [],
-            "commitMode": true,
-            "empty_summary": "## 更新详情\n- 常规代码优化与维护"
-          }
-          EOF
-
-      - name: Build Changelog
-        id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@v5
-        with:
-          configuration: "changelog_config.json"
-          outputFile: "release-notes.md"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check Changelog Content
-        shell: bash
-        run: |
-          echo "=== RELEASE NOTES START ==="
-          cat release-notes.md
-          echo "=== RELEASE NOTES END ==="
-
-      - name: Inject Configuration
-        shell: bash
-        run: |
-          npm pkg set build.releaseInfo.releaseNotesFile=release-notes.md
-
       - name: Package and Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           npx electron-builder --publish always
+
+      - name: Update Release Notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          cat <<EOF > release_notes.md
+          ## 更新日志
+          修复了一些已知问题
+
+          ## 查看更多日志/获取最新动态
+          [点击加入 Telegram 频道](https://t.me/weflow_cc)
+          EOF
+          
+          gh release edit "$GITHUB_REF_NAME" --notes-file release_notes.md

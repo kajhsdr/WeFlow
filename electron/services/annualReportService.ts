@@ -69,6 +69,20 @@ export interface AnnualReportData {
     phrase: string
     count: number
   }[]
+  snsStats?: {
+    totalPosts: number
+    typeCounts?: Record<string, number>
+    topLikers: { username: string; displayName: string; avatarUrl?: string; count: number }[]
+    topLiked: { username: string; displayName: string; avatarUrl?: string; count: number }[]
+  }
+  lostFriend: {
+    username: string
+    displayName: string
+    avatarUrl?: string
+    earlyCount: number
+    lateCount: number
+    periodDesc: string
+  } | null
 }
 
 class AnnualReportService {
@@ -101,8 +115,9 @@ class AnnualReportService {
       return trimmed
     }
     const suffixMatch = trimmed.match(/^(.+)_([a-zA-Z0-9]{4})$/)
-    if (suffixMatch) return suffixMatch[1]
-    return trimmed
+    const cleaned = suffixMatch ? suffixMatch[1] : trimmed
+
+    return cleaned
   }
 
   private async ensureConnectedWithConfig(
@@ -178,11 +193,15 @@ class AnnualReportService {
     if (!raw) return ''
     if (typeof raw === 'string') {
       if (raw.length === 0) return ''
-      if (this.looksLikeHex(raw)) {
+      // 只有当字符串足够长（超过16字符）且看起来像 hex 时才尝试解码
+      // 短字符串（如 "123456" 等纯数字）容易被误判为 hex
+      if (raw.length > 16 && this.looksLikeHex(raw)) {
         const bytes = Buffer.from(raw, 'hex')
         if (bytes.length > 0) return this.decodeBinaryContent(bytes)
       }
-      if (this.looksLikeBase64(raw)) {
+      // 只有当字符串足够长（超过16字符）且看起来像 base64 时才尝试解码
+      // 短字符串（如 "test", "home" 等）容易被误判为 base64
+      if (raw.length > 16 && this.looksLikeBase64(raw)) {
         try {
           const bytes = Buffer.from(raw, 'base64')
           return this.decodeBinaryContent(bytes)
@@ -397,8 +416,15 @@ class AnnualReportService {
 
       this.reportProgress('加载会话列表...', 15, onProgress)
 
-      const startTime = Math.floor(new Date(year, 0, 1).getTime() / 1000)
-      const endTime = Math.floor(new Date(year, 11, 31, 23, 59, 59).getTime() / 1000)
+      const isAllTime = year <= 0
+      const reportYear = isAllTime ? 0 : year
+      const startTime = isAllTime ? 0 : Math.floor(new Date(year, 0, 1).getTime() / 1000)
+      const endTime = isAllTime ? 0 : Math.floor(new Date(year, 11, 31, 23, 59, 59).getTime() / 1000)
+
+      const now = new Date()
+      // 全局统计始终使用自然年范围 (Jan 1st - Now/YearEnd)
+      const actualStartTime = startTime
+      const actualEndTime = endTime
 
       let totalMessages = 0
       const contactStats = new Map<string, { sent: number; received: number }>()
@@ -420,7 +446,7 @@ class AnnualReportService {
       const CONVERSATION_GAP = 3600
 
       this.reportProgress('统计会话消息...', 20, onProgress)
-      const result = await wcdbService.getAnnualReportStats(sessionIds, startTime, endTime)
+      const result = await wcdbService.getAnnualReportStats(sessionIds, actualStartTime, actualEndTime)
       if (!result.success || !result.data) {
         return { success: false, error: result.error ? `基础统计失败: ${result.error}` : '基础统计失败' }
       }
@@ -473,8 +499,8 @@ class AnnualReportService {
         }
       }
 
-      this.reportProgress('加载扩展统计... (初始化)', 30, onProgress)
-      const extras = await wcdbService.getAnnualReportExtras(sessionIds, startTime, endTime, peakDayBegin, peakDayEnd)
+      this.reportProgress('加载扩展统计...', 30, onProgress)
+      const extras = await wcdbService.getAnnualReportExtras(sessionIds, actualStartTime, actualEndTime, peakDayBegin, peakDayEnd)
       if (extras.success && extras.data) {
         this.reportProgress('加载扩展统计... (解析热力图)', 32, onProgress)
         const extrasData = extras.data as any
@@ -554,7 +580,7 @@ class AnnualReportService {
         // 为保持功能完整，我们进行深度集成的轻量遍历：
         for (let i = 0; i < sessionIds.length; i++) {
           const sessionId = sessionIds[i]
-          const cursor = await wcdbService.openMessageCursorLite(sessionId, 1000, true, startTime, endTime)
+          const cursor = await wcdbService.openMessageCursorLite(sessionId, 1000, true, actualStartTime, actualEndTime)
           if (!cursor.success || !cursor.cursor) continue
 
           let lastDayIndex: number | null = null
@@ -575,8 +601,21 @@ class AnnualReportService {
                 if (!createTime) continue
 
                 const isSendRaw = row.computed_is_send ?? row.is_send ?? '0'
-                const isSent = parseInt(isSendRaw, 10) === 1
+                let isSent = parseInt(isSendRaw, 10) === 1
                 const localType = parseInt(row.local_type || row.type || '1', 10)
+
+                // 兼容逻辑
+                if (isSendRaw === undefined || isSendRaw === null || isSendRaw === '0') {
+                  const sender = String(row.sender_username || row.sender || row.talker || '').toLowerCase()
+                  if (sender) {
+                    const rawLower = rawWxid.toLowerCase()
+                    const cleanedLower = cleanedWxid.toLowerCase()
+                    if (sender === rawLower || sender === cleanedLower ||
+                      rawLower.startsWith(sender + '_') || cleanedLower.startsWith(sender + '_')) {
+                      isSent = true
+                    }
+                  }
+                }
 
                 // 响应速度 & 对话发起
                 if (!conversationStarts.has(sessionId)) {
@@ -689,12 +728,48 @@ class AnnualReportService {
 
       if (!streakComputedInLoop) {
         this.reportProgress('计算连续聊天...', 45, onProgress)
-        const streakResult = await this.computeLongestStreak(sessionIds, startTime, endTime, onProgress, 45, 75)
+        const streakResult = await this.computeLongestStreak(sessionIds, actualStartTime, actualEndTime, onProgress, 45, 75)
         if (streakResult.days > longestStreakDays) {
           longestStreakDays = streakResult.days
           longestStreakSessionId = streakResult.sessionId
           longestStreakStart = streakResult.start
           longestStreakEnd = streakResult.end
+        }
+      }
+
+      // 获取朋友圈统计
+      this.reportProgress('分析朋友圈数据...', 75, onProgress)
+      let snsStatsResult: {
+        totalPosts: number
+        typeCounts?: Record<string, number>
+        topLikers: { username: string; displayName: string; avatarUrl?: string; count: number }[]
+        topLiked: { username: string; displayName: string; avatarUrl?: string; count: number }[]
+      } | undefined
+
+      const snsStats = await wcdbService.getSnsAnnualStats(actualStartTime, actualEndTime)
+
+      if (snsStats.success && snsStats.data) {
+        const d = snsStats.data
+        const usersToFetch = new Set<string>()
+        d.topLikers?.forEach((u: any) => usersToFetch.add(u.username))
+        d.topLiked?.forEach((u: any) => usersToFetch.add(u.username))
+
+        const snsUserIds = Array.from(usersToFetch)
+        const [snsDisplayNames, snsAvatarUrls] = await Promise.all([
+          wcdbService.getDisplayNames(snsUserIds),
+          wcdbService.getAvatarUrls(snsUserIds)
+        ])
+
+        const getSnsUserInfo = (username: string) => ({
+          displayName: snsDisplayNames.success && snsDisplayNames.map ? (snsDisplayNames.map[username] || username) : username,
+          avatarUrl: snsAvatarUrls.success && snsAvatarUrls.map ? snsAvatarUrls.map[username] : undefined
+        })
+
+        snsStatsResult = {
+          totalPosts: d.totalPosts || 0,
+          typeCounts: d.typeCounts,
+          topLikers: (d.topLikers || []).map((u: any) => ({ ...u, ...getSnsUserInfo(u.username) })),
+          topLiked: (d.topLiked || []).map((u: any) => ({ ...u, ...getSnsUserInfo(u.username) }))
         }
       }
 
@@ -901,8 +976,130 @@ class AnnualReportService {
           .slice(0, 32)
           .map(([phrase, count]) => ({ phrase, count }))
 
+      // 曾经的好朋友 (Once Best Friend / Lost Friend)
+      let lostFriend: AnnualReportData['lostFriend'] = null
+      let maxEarlyCount = 80  // 最低门槛
+      let bestEarlyCount = 0
+      let bestLateCount = 0
+      let bestSid = ''
+      let bestPeriodDesc = ''
+
+      const currentMonthIndex = new Date().getMonth() + 1 // 1-12
+
+      const currentYearNum = now.getFullYear()
+
+      if (isAllTime) {
+        const days = Object.keys(d.daily).sort()
+        if (days.length >= 2) {
+          const firstDay = Math.floor(new Date(days[0]).getTime() / 1000)
+          const lastDay = Math.floor(new Date(days[days.length - 1]).getTime() / 1000)
+          const midPoint = Math.floor((firstDay + lastDay) / 2)
+
+          this.reportProgress('分析历史趋势 (1/2)...', 86, onProgress)
+          const earlyRes = await wcdbService.getAggregateStats(sessionIds, 0, midPoint)
+          this.reportProgress('分析历史趋势 (2/2)...', 88, onProgress)
+          const lateRes = await wcdbService.getAggregateStats(sessionIds, midPoint, 0)
+
+          if (earlyRes.success && lateRes.success && earlyRes.data) {
+            const earlyData = earlyRes.data.sessions || {}
+            const lateData = (lateRes.data?.sessions) || {}
+            for (const sid of sessionIds) {
+              const e = earlyData[sid] || { sent: 0, received: 0 }
+              const l = lateData[sid] || { sent: 0, received: 0 }
+              const early = (e.sent || 0) + (e.received || 0)
+              const late = (l.sent || 0) + (l.received || 0)
+              if (early > 100 && early > late * 5) {
+                // 选择前期消息量最多的
+                if (early > maxEarlyCount) {
+                  maxEarlyCount = early
+                  bestEarlyCount = early
+                  bestLateCount = late
+                  bestSid = sid
+                  bestPeriodDesc = '这段时间以来'
+                }
+              }
+            }
+          }
+        }
+      } else if (year === currentYearNum) {
+        // 当前年份：独立获取过去12个月的滚动数据
+        this.reportProgress('分析近期好友趋势...', 86, onProgress)
+        // 往前数12个月的起点、中点、终点
+        const rollingStart = Math.floor(new Date(now.getFullYear(), now.getMonth() - 11, 1).getTime() / 1000)
+        const rollingMid = Math.floor(new Date(now.getFullYear(), now.getMonth() - 5, 1).getTime() / 1000)
+        const rollingEnd = Math.floor(now.getTime() / 1000)
+
+        const earlyRes = await wcdbService.getAggregateStats(sessionIds, rollingStart, rollingMid - 1)
+        const lateRes = await wcdbService.getAggregateStats(sessionIds, rollingMid, rollingEnd)
+
+        if (earlyRes.success && lateRes.success && earlyRes.data) {
+          const earlyData = earlyRes.data.sessions || {}
+          const lateData = lateRes.data?.sessions || {}
+          for (const sid of sessionIds) {
+            const e = earlyData[sid] || { sent: 0, received: 0 }
+            const l = lateData[sid] || { sent: 0, received: 0 }
+            const early = (e.sent || 0) + (e.received || 0)
+            const late = (l.sent || 0) + (l.received || 0)
+            if (early > 80 && early > late * 5) {
+              // 选择前期消息量最多的
+              if (early > maxEarlyCount) {
+                maxEarlyCount = early
+                bestEarlyCount = early
+                bestLateCount = late
+                bestSid = sid
+                bestPeriodDesc = '去年的这个时候'
+              }
+            }
+          }
+        }
+      } else {
+        // 指定完整年份 (1-6 vs 7-12)
+        for (const [sid, stat] of Object.entries(d.sessions)) {
+          const s = stat as any
+          const mWeights = s.monthly || {}
+          let early = 0
+          let late = 0
+          for (let m = 1; m <= 6; m++) early += mWeights[m] || 0
+          for (let m = 7; m <= 12; m++) late += mWeights[m] || 0
+
+          if (early > 80 && early > late * 5) {
+            // 选择前期消息量最多的
+            if (early > maxEarlyCount) {
+              maxEarlyCount = early
+              bestEarlyCount = early
+              bestLateCount = late
+              bestSid = sid
+              bestPeriodDesc = `${year}年上半年`
+            }
+          }
+        }
+      }
+
+      if (bestSid) {
+        let info = contactInfoMap.get(bestSid)
+        // 如果 contactInfoMap 中没有该联系人，则单独获取
+        if (!info) {
+          const [displayNameRes, avatarUrlRes] = await Promise.all([
+            wcdbService.getDisplayNames([bestSid]),
+            wcdbService.getAvatarUrls([bestSid])
+          ])
+          info = {
+            displayName: displayNameRes.success && displayNameRes.map ? (displayNameRes.map[bestSid] || bestSid) : bestSid,
+            avatarUrl: avatarUrlRes.success && avatarUrlRes.map ? avatarUrlRes.map[bestSid] : undefined
+          }
+        }
+        lostFriend = {
+          username: bestSid,
+          displayName: info?.displayName || bestSid,
+          avatarUrl: info?.avatarUrl,
+          earlyCount: bestEarlyCount,
+          lateCount: bestLateCount,
+          periodDesc: bestPeriodDesc
+        }
+      }
+
       const reportData: AnnualReportData = {
-        year,
+        year: reportYear,
         totalMessages,
         totalFriends: contactStats.size,
         coreFriends,
@@ -915,7 +1112,9 @@ class AnnualReportService {
         mutualFriend,
         socialInitiative,
         responseSpeed,
-        topPhrases
+        topPhrases,
+        snsStats: snsStatsResult,
+        lostFriend
       }
 
       return { success: true, data: reportData }

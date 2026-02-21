@@ -36,7 +36,7 @@ class VideoService {
      * 获取缓存目录（解密后的数据库存放位置）
      */
     private getCachePath(): string {
-        return this.configService.get('cachePath') || ''
+        return this.configService.getCacheBasePath()
     }
 
     /**
@@ -97,7 +97,7 @@ class VideoService {
                             return realMd5
                         }
                     } catch (e) {
-                        // Silently fail
+                        // 忽略错误
                     }
                 }
             }
@@ -105,19 +105,30 @@ class VideoService {
 
         // 方法2：使用 wcdbService.execQuery 查询加密的 hardlink.db
         if (dbPath) {
-            const encryptedDbPaths = [
-                join(dbPath, wxid, 'db_storage', 'hardlink', 'hardlink.db'),
-                join(dbPath, cleanedWxid, 'db_storage', 'hardlink', 'hardlink.db')
-            ]
+            // 检查 dbPath 是否已经包含 wxid
+            const dbPathLower = dbPath.toLowerCase()
+            const wxidLower = wxid.toLowerCase()
+            const cleanedWxidLower = cleanedWxid.toLowerCase()
+            const dbPathContainsWxid = dbPathLower.includes(wxidLower) || dbPathLower.includes(cleanedWxidLower)
+
+            const encryptedDbPaths: string[] = []
+            if (dbPathContainsWxid) {
+                // dbPath 已包含 wxid，不需要再拼接
+                encryptedDbPaths.push(join(dbPath, 'db_storage', 'hardlink', 'hardlink.db'))
+            } else {
+                // dbPath 不包含 wxid，需要拼接
+                encryptedDbPaths.push(join(dbPath, wxid, 'db_storage', 'hardlink', 'hardlink.db'))
+                encryptedDbPaths.push(join(dbPath, cleanedWxid, 'db_storage', 'hardlink', 'hardlink.db'))
+            }
 
             for (const p of encryptedDbPaths) {
                 if (existsSync(p)) {
                     try {
                         const escapedMd5 = md5.replace(/'/g, "''")
-                        
+
                         // 用 md5 字段查询，获取 file_name
                         const sql = `SELECT file_name FROM video_hardlink_info_v4 WHERE md5 = '${escapedMd5}' LIMIT 1`
-                        
+
                         const result = await wcdbService.execQuery('media', p, sql)
 
                         if (result.success && result.rows && result.rows.length > 0) {
@@ -129,6 +140,7 @@ class VideoService {
                             }
                         }
                     } catch (e) {
+                        // 忽略错误
                     }
                 }
             }
@@ -155,7 +167,6 @@ class VideoService {
      * 文件命名: {md5}.mp4, {md5}.jpg, {md5}_thumb.jpg
      */
     async getVideoInfo(videoMd5: string): Promise<VideoInfo> {
-
         const dbPath = this.getDbPath()
         const wxid = this.getMyWxid()
 
@@ -166,7 +177,19 @@ class VideoService {
         // 先尝试从数据库查询真正的视频文件名
         const realVideoMd5 = await this.queryVideoFileName(videoMd5) || videoMd5
 
-        const videoBaseDir = join(dbPath, wxid, 'msg', 'video')
+        // 检查 dbPath 是否已经包含 wxid，避免重复拼接
+        const dbPathLower = dbPath.toLowerCase()
+        const wxidLower = wxid.toLowerCase()
+        const cleanedWxid = this.cleanWxid(wxid)
+
+        let videoBaseDir: string
+        if (dbPathLower.includes(wxidLower) || dbPathLower.includes(cleanedWxid.toLowerCase())) {
+            // dbPath 已经包含 wxid，直接使用
+            videoBaseDir = join(dbPath, 'msg', 'video')
+        } else {
+            // dbPath 不包含 wxid，需要拼接
+            videoBaseDir = join(dbPath, wxid, 'msg', 'video')
+        }
 
         if (!existsSync(videoBaseDir)) {
             return { exists: false }
@@ -202,7 +225,7 @@ class VideoService {
                 }
             }
         } catch (e) {
-            console.error('[VideoService] Error searching for video:', e)
+            // 忽略错误
         }
 
         return { exists: false }
@@ -212,7 +235,7 @@ class VideoService {
      * 根据消息内容解析视频MD5
      */
     parseVideoMd5(content: string): string | undefined {
-        
+
         // 打印前500字符看看 XML 结构
 
         if (!content) return undefined
@@ -229,7 +252,7 @@ class VideoService {
             // 提取 md5（用于查询 hardlink.db）
             // 注意：不是 rawmd5，rawmd5 是另一个值
             // 格式: md5="xxx" 或 <md5>xxx</md5>
-            
+
             // 尝试从videomsg标签中提取md5
             const videoMsgMatch = /<videomsg[^>]*\smd5\s*=\s*['"]([a-fA-F0-9]+)['"]/i.exec(content)
             if (videoMsgMatch) {

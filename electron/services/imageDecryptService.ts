@@ -11,7 +11,16 @@ import { wcdbService } from './wcdbService'
 // 获取 ffmpeg-static 的路径
 function getStaticFfmpegPath(): string | null {
   try {
-    // 方法1: 直接 require ffmpeg-static
+    // 优先处理打包后的路径
+    if (app.isPackaged) {
+      const resourcesPath = process.resourcesPath
+      const packedPath = join(resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe')
+      if (existsSync(packedPath)) {
+        return packedPath
+      }
+    }
+
+    // 方法1: 直接 require ffmpeg-static（开发环境）
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const ffmpegStatic = require('ffmpeg-static')
 
@@ -19,19 +28,10 @@ function getStaticFfmpegPath(): string | null {
       return ffmpegStatic
     }
 
-    // 方法2: 手动构建路径（开发环境）
+    // 方法2: 手动构建路径（开发环境备用）
     const devPath = join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe')
     if (existsSync(devPath)) {
       return devPath
-    }
-
-    // 方法3: 打包后的路径
-    if (app.isPackaged) {
-      const resourcesPath = process.resourcesPath
-      const packedPath = join(resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe')
-      if (existsSync(packedPath)) {
-        return packedPath
-      }
     }
 
     return null
@@ -380,9 +380,9 @@ export class ImageDecryptService {
     }
 
     const suffixMatch = trimmed.match(/^(.+)_([a-zA-Z0-9]{4})$/)
-    if (suffixMatch) return suffixMatch[1]
-
-    return trimmed
+    const cleaned = suffixMatch ? suffixMatch[1] : trimmed
+    
+    return cleaned
   }
 
   private async resolveDatPath(
@@ -415,10 +415,16 @@ export class ImageDecryptService {
           if (imageDatName) this.cacheDatPath(accountDir, imageDatName, hardlinkPath)
           return hardlinkPath
         }
-        // hardlink 找到的是缩略图，但要求高清图，直接返回 null，不再搜索
-        if (!allowThumbnail && isThumb) {
-          return null
+        // hardlink 找到的是缩略图，但要求高清图
+        // 尝试在同一目录下查找高清图变体（快速查找，不遍历）
+        const hdPath = this.findHdVariantInSameDir(hardlinkPath)
+        if (hdPath) {
+          this.cacheDatPath(accountDir, imageMd5, hdPath)
+          if (imageDatName) this.cacheDatPath(accountDir, imageDatName, hdPath)
+          return hdPath
         }
+        // 没找到高清图，返回 null（不进行全局搜索）
+        return null
       }
       this.logInfo('[ImageDecrypt] hardlink miss (md5)', { imageMd5 })
       if (imageDatName && this.looksLikeMd5(imageDatName) && imageDatName !== imageMd5) {
@@ -431,9 +437,13 @@ export class ImageDecryptService {
             this.cacheDatPath(accountDir, imageDatName, fallbackPath)
             return fallbackPath
           }
-          if (!allowThumbnail && isThumb) {
-            return null
+          // 找到缩略图但要求高清图，尝试同目录查找高清图变体
+          const hdPath = this.findHdVariantInSameDir(fallbackPath)
+          if (hdPath) {
+            this.cacheDatPath(accountDir, imageDatName, hdPath)
+            return hdPath
           }
+          return null
         }
         this.logInfo('[ImageDecrypt] hardlink miss (datName)', { imageDatName })
       }
@@ -449,10 +459,13 @@ export class ImageDecryptService {
           this.cacheDatPath(accountDir, imageDatName, hardlinkPath)
           return hardlinkPath
         }
-        // hardlink 找到的是缩略图，但要求高清图，直接返回 null
-        if (!allowThumbnail && isThumb) {
-          return null
+        // hardlink 找到的是缩略图，但要求高清图
+        const hdPath = this.findHdVariantInSameDir(hardlinkPath)
+        if (hdPath) {
+          this.cacheDatPath(accountDir, imageDatName, hdPath)
+          return hdPath
         }
+        return null
       }
       this.logInfo('[ImageDecrypt] hardlink miss (datName)', { imageDatName })
     }
@@ -467,6 +480,9 @@ export class ImageDecryptService {
       const cached = this.resolvedCache.get(imageDatName)
       if (cached && existsSync(cached)) {
         if (allowThumbnail || !this.isThumbnailPath(cached)) return cached
+        // 缓存的是缩略图，尝试找高清图
+        const hdPath = this.findHdVariantInSameDir(cached)
+        if (hdPath) return hdPath
       }
     }
 
@@ -761,11 +777,150 @@ export class ImageDecryptService {
 
     const root = join(accountDir, 'msg', 'attach')
     if (!existsSync(root)) return null
+
+    // 优化1：快速概率性查找
+    // 包含：1. 基于文件名的前缀猜测 (旧版)
+    //       2. 基于日期的最近月份扫描 (新版无索引时)
+    const fastHit = await this.fastProbabilisticSearch(root, datName)
+    if (fastHit) {
+      this.resolvedCache.set(key, fastHit)
+      return fastHit
+    }
+
+    // 优化2：兜底扫描 (异步非阻塞)
     const found = await this.walkForDatInWorker(root, datName.toLowerCase(), 8, allowThumbnail, thumbOnly)
     if (found) {
       this.resolvedCache.set(key, found)
       return found
     }
+    return null
+  }
+
+  /**
+   * 基于文件名的哈希特征猜测可能的路径
+   * 包含：1. 微信旧版结构 filename.substr(0, 2)/...
+   *       2. 微信新版结构 msg/attach/{hash}/{YYYY-MM}/Img/filename
+   */
+  private async fastProbabilisticSearch(root: string, datName: string): Promise<string | null> {
+    const { promises: fs } = require('fs')
+    const { join } = require('path')
+
+    try {
+      // --- 策略 A: 旧版路径猜测 (msg/attach/xx/yy/...) ---
+      const lowerName = datName.toLowerCase()
+      let baseName = lowerName
+      if (baseName.endsWith('.dat')) {
+        baseName = baseName.slice(0, -4)
+        if (baseName.endsWith('_t') || baseName.endsWith('.t') || baseName.endsWith('_hd')) {
+          baseName = baseName.slice(0, -3)
+        } else if (baseName.endsWith('_thumb')) {
+          baseName = baseName.slice(0, -6)
+        }
+      }
+
+      const candidates: string[] = []
+      if (/^[a-f0-9]{32}$/.test(baseName)) {
+        const dir1 = baseName.substring(0, 2)
+        const dir2 = baseName.substring(2, 4)
+        candidates.push(
+          join(root, dir1, dir2, datName),
+          join(root, dir1, dir2, 'Img', datName),
+          join(root, dir1, dir2, 'mg', datName),
+          join(root, dir1, dir2, 'Image', datName)
+        )
+      }
+
+      for (const path of candidates) {
+        try {
+          await fs.access(path)
+          return path
+        } catch { }
+      }
+
+      // --- 策略 B: 新版 Session 哈希路径猜测 ---
+      try {
+        const entries = await fs.readdir(root, { withFileTypes: true })
+        const sessionDirs = entries
+          .filter((e: any) => e.isDirectory() && e.name.length === 32 && /^[a-f0-9]+$/i.test(e.name))
+          .map((e: any) => e.name)
+
+        if (sessionDirs.length === 0) return null
+
+        const now = new Date()
+        const months: string[] = []
+        for (let i = 0; i < 2; i++) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+          const mStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+          months.push(mStr)
+        }
+
+        const targetNames = [datName]
+        if (baseName !== lowerName) {
+          targetNames.push(`${baseName}.dat`)
+          targetNames.push(`${baseName}_t.dat`)
+          targetNames.push(`${baseName}_thumb.dat`)
+        }
+
+        const batchSize = 20
+        for (let i = 0; i < sessionDirs.length; i += batchSize) {
+          const batch = sessionDirs.slice(i, i + batchSize)
+          const tasks = batch.map(async (sessDir: string) => {
+            for (const month of months) {
+              const subDirs = ['Img', 'Image']
+              for (const sub of subDirs) {
+                const dirPath = join(root, sessDir, month, sub)
+                try { await fs.access(dirPath) } catch { continue }
+                for (const name of targetNames) {
+                  const p = join(dirPath, name)
+                  try { await fs.access(p); return p } catch { }
+                }
+              }
+            }
+            return null
+          })
+          const results = await Promise.all(tasks)
+          const hit = results.find(r => r !== null)
+          if (hit) return hit
+        }
+      } catch { }
+
+    } catch { }
+    return null
+  }
+
+  /**
+   * 在同一目录下查找高清图变体
+   * 缩略图: xxx_t.dat -> 高清图: xxx_h.dat 或 xxx.dat
+   */
+  private findHdVariantInSameDir(thumbPath: string): string | null {
+    try {
+      const dir = dirname(thumbPath)
+      const fileName = basename(thumbPath).toLowerCase()
+
+      // 提取基础名称（去掉 _t.dat 或 .t.dat）
+      let baseName = fileName
+      if (baseName.endsWith('_t.dat')) {
+        baseName = baseName.slice(0, -6)
+      } else if (baseName.endsWith('.t.dat')) {
+        baseName = baseName.slice(0, -6)
+      } else {
+        return null
+      }
+
+      // 尝试查找高清图变体
+      const variants = [
+        `${baseName}_h.dat`,
+        `${baseName}.h.dat`,
+        `${baseName}.dat`
+      ]
+
+      for (const variant of variants) {
+        const variantPath = join(dir, variant)
+        if (existsSync(variantPath)) {
+          return variantPath
+        }
+      }
+    } catch { }
     return null
   }
 
@@ -899,42 +1054,71 @@ export class ImageDecryptService {
   }
 
   private findCachedOutput(cacheKey: string, preferHd: boolean = false, sessionId?: string): string | null {
-    const root = this.getCacheRoot()
+    const allRoots = this.getAllCacheRoots()
     const normalizedKey = this.normalizeDatBase(cacheKey.toLowerCase())
     const extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
 
-    if (sessionId) {
-      const sessionDir = join(root, this.sanitizeDirName(sessionId))
-      if (existsSync(sessionDir)) {
-        try {
-          const sessionEntries = readdirSync(sessionDir)
-          for (const entry of sessionEntries) {
-            const timeDir = join(sessionDir, entry)
-            if (!this.isDirectory(timeDir)) continue
-            const hit = this.findCachedOutputInDir(timeDir, normalizedKey, extensions, preferHd)
-            if (hit) return hit
-          }
-        } catch {
-          // ignore
+    // 遍历所有可能的缓存根路径
+    for (const root of allRoots) {
+      // 策略1: 新目录结构 Images/{sessionId}/{YYYY-MM}/{file}_hd.jpg
+      if (sessionId) {
+        const sessionDir = join(root, this.sanitizeDirName(sessionId))
+        if (existsSync(sessionDir)) {
+          try {
+            const dateDirs = readdirSync(sessionDir, { withFileTypes: true })
+              .filter(d => d.isDirectory() && /^\d{4}-\d{2}$/.test(d.name))
+              .map(d => d.name)
+              .sort()
+              .reverse() // 最新的日期优先
+
+            for (const dateDir of dateDirs) {
+              const imageDir = join(sessionDir, dateDir)
+              const hit = this.findCachedOutputInDir(imageDir, normalizedKey, extensions, preferHd)
+              if (hit) return hit
+            }
+          } catch { }
         }
       }
-    }
 
-    // 新目录结构: Images/{normalizedKey}/{normalizedKey}_thumb.jpg 或 _hd.jpg
-    const imageDir = join(root, normalizedKey)
-    if (existsSync(imageDir)) {
-      const hit = this.findCachedOutputInDir(imageDir, normalizedKey, extensions, preferHd)
-      if (hit) return hit
-    }
+      // 策略2: 遍历所有 sessionId 目录查找（如果没有指定 sessionId）
+      try {
+        const sessionDirs = readdirSync(root, { withFileTypes: true })
+          .filter(d => d.isDirectory())
+          .map(d => d.name)
 
-    // 兼容旧的平铺结构
-    for (const ext of extensions) {
-      const candidate = join(root, `${cacheKey}${ext}`)
-      if (existsSync(candidate)) return candidate
-    }
-    for (const ext of extensions) {
-      const candidate = join(root, `${cacheKey}_t${ext}`)
-      if (existsSync(candidate)) return candidate
+        for (const session of sessionDirs) {
+          const sessionDir = join(root, session)
+          // 检查是否是日期目录结构
+          try {
+            const subDirs = readdirSync(sessionDir, { withFileTypes: true })
+              .filter(d => d.isDirectory() && /^\d{4}-\d{2}$/.test(d.name))
+              .map(d => d.name)
+
+            for (const dateDir of subDirs) {
+              const imageDir = join(sessionDir, dateDir)
+              const hit = this.findCachedOutputInDir(imageDir, normalizedKey, extensions, preferHd)
+              if (hit) return hit
+            }
+          } catch { }
+        }
+      } catch { }
+
+      // 策略3: 旧目录结构 Images/{normalizedKey}/{normalizedKey}_thumb.jpg
+      const oldImageDir = join(root, normalizedKey)
+      if (existsSync(oldImageDir)) {
+        const hit = this.findCachedOutputInDir(oldImageDir, normalizedKey, extensions, preferHd)
+        if (hit) return hit
+      }
+
+      // 策略4: 最旧的平铺结构 Images/{file}.jpg
+      for (const ext of extensions) {
+        const candidate = join(root, `${cacheKey}${ext}`)
+        if (existsSync(candidate)) return candidate
+      }
+      for (const ext of extensions) {
+        const candidate = join(root, `${cacheKey}_t${ext}`)
+        if (existsSync(candidate)) return candidate
+      }
     }
 
     return null
@@ -1104,20 +1288,57 @@ export class ImageDecryptService {
     if (this.cacheIndexed) return
     if (this.cacheIndexing) return this.cacheIndexing
     this.cacheIndexing = new Promise((resolve) => {
-      const root = this.getCacheRoot()
-      try {
-        this.indexCacheDir(root, 2, 0)
-      } catch {
-        this.cacheIndexed = true
-        this.cacheIndexing = null
-        resolve()
-        return
+      // 扫描所有可能的缓存根目录
+      const allRoots = this.getAllCacheRoots()
+      this.logInfo('开始索引缓存', { roots: allRoots.length })
+
+      for (const root of allRoots) {
+        try {
+          this.indexCacheDir(root, 3, 0) // 增加深度到3，支持 sessionId/YYYY-MM 结构
+        } catch (e) {
+          this.logError('索引目录失败', e, { root })
+        }
       }
+
+      this.logInfo('缓存索引完成', { entries: this.resolvedCache.size })
       this.cacheIndexed = true
       this.cacheIndexing = null
       resolve()
     })
     return this.cacheIndexing
+  }
+
+  /**
+   * 获取所有可能的缓存根路径（用于查找已缓存的图片）
+   * 包含当前路径、配置路径、旧版本路径
+   */
+  private getAllCacheRoots(): string[] {
+    const roots: string[] = []
+    const configured = this.configService.get('cachePath')
+    const documentsPath = app.getPath('documents')
+
+    // 主要路径（当前使用的）
+    const mainRoot = this.getCacheRoot()
+    roots.push(mainRoot)
+
+    // 如果配置了自定义路径，也检查其下的 Images
+    if (configured) {
+      roots.push(join(configured, 'Images'))
+      roots.push(join(configured, 'images'))
+    }
+
+    // 默认路径
+    roots.push(join(documentsPath, 'WeFlow', 'Images'))
+    roots.push(join(documentsPath, 'WeFlow', 'images'))
+
+    // 兼容旧路径（如果有的话）
+    roots.push(join(documentsPath, 'WeFlowData', 'Images'))
+
+    // 去重并过滤存在的路径
+    const uniqueRoots = Array.from(new Set(roots))
+    const existingRoots = uniqueRoots.filter(r => existsSync(r))
+
+    return existingRoots
   }
 
   private indexCacheDir(root: string, maxDepth: number, depth: number): void {

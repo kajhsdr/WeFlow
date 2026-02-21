@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Link } from 'lucide-react'
+import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Link, Mic, CheckCircle, Copy, Check, CheckSquare, Download, BarChart3, Edit2, Trash2 } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { useChatStore } from '../stores/chatStore'
+import { useBatchTranscribeStore } from '../stores/batchTranscribeStore'
 import type { ChatSession, Message } from '../types/models'
 import { getEmojiPath } from 'wechat-emojis'
-import { ImagePreview } from '../components/ImagePreview'
 import { VoiceTranscribeDialog } from '../components/VoiceTranscribeDialog'
 import { AnimatedStreamingText } from '../components/AnimatedStreamingText'
+import JumpToDateDialog from '../components/JumpToDateDialog'
 import * as configService from '../services/config'
 import './ChatPage.scss'
 
@@ -16,9 +18,120 @@ const SYSTEM_MESSAGE_TYPES = [
   266287972401, // 拍一拍
 ]
 
+interface XmlField {
+  key: string;
+  value: string;
+  type: 'attr' | 'node';
+  tagName?: string;
+  path: string;
+}
+
+// 尝试解析 XML 为可编辑字段
+function parseXmlToFields(xml: string): XmlField[] {
+  const fields: XmlField[] = []
+  if (!xml || !xml.includes('<')) return []
+  try {
+    const parser = new DOMParser()
+    // 包装一下确保是单一根节点
+    const wrappedXml = xml.trim().startsWith('<?xml') ? xml : `<root>${xml}</root>`
+    const doc = parser.parseFromString(wrappedXml, 'text/xml')
+    const errorNode = doc.querySelector('parsererror')
+    if (errorNode) return []
+
+    const walk = (node: Node, path: string = '') => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const element = node as Element
+        if (element.tagName === 'root') {
+          node.childNodes.forEach((child, index) => walk(child, path))
+          return
+        }
+
+        const currentPath = path ? `${path} > ${element.tagName}` : element.tagName
+
+        for (let i = 0; i < element.attributes.length; i++) {
+          const attr = element.attributes[i]
+          fields.push({
+            key: attr.name,
+            value: attr.value,
+            type: 'attr',
+            tagName: element.tagName,
+            path: `${currentPath}[@${attr.name}]`
+          })
+        }
+
+        if (element.childNodes.length === 1 && element.childNodes[0].nodeType === Node.TEXT_NODE) {
+          const text = element.textContent?.trim() || ''
+          if (text) {
+            fields.push({
+              key: element.tagName,
+              value: text,
+              type: 'node',
+              path: currentPath
+            })
+          }
+        } else {
+          node.childNodes.forEach((child, index) => walk(child, `${currentPath}[${index}]`))
+        }
+      }
+    }
+    doc.childNodes.forEach((node, index) => walk(node, ''))
+  } catch (e) {
+    console.warn('[XML Parse] Failed:', e)
+  }
+  return fields
+}
+
+// 将编辑后的字段同步回 XML
+function updateXmlWithFields(xml: string, fields: XmlField[]): string {
+  try {
+    const parser = new DOMParser()
+    const wrappedXml = xml.trim().startsWith('<?xml') ? xml : `<root>${xml}</root>`
+    const doc = parser.parseFromString(wrappedXml, 'text/xml')
+    const errorNode = doc.querySelector('parsererror')
+    if (errorNode) return xml
+
+    fields.forEach(f => {
+      if (f.type === 'attr') {
+        const elements = doc.getElementsByTagName(f.tagName!)
+        if (elements.length > 0) {
+          elements[0].setAttribute(f.key, f.value)
+        }
+      } else {
+        const elements = doc.getElementsByTagName(f.key)
+        if (elements.length > 0 && (elements[0].childNodes.length <= 1)) {
+          elements[0].textContent = f.value
+        }
+      }
+    })
+
+    let result = new XMLSerializer().serializeToString(doc)
+    if (!xml.trim().startsWith('<?xml')) {
+      result = result.replace('<root>', '').replace('</root>', '').replace('<root/>', '')
+    }
+    return result
+  } catch (e) {
+    return xml
+  }
+}
+
 // 判断是否为系统消息
 function isSystemMessage(localType: number): boolean {
   return SYSTEM_MESSAGE_TYPES.includes(localType)
+}
+
+// 格式化文件大小
+function formatFileSize(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
+}
+
+// 清理消息内容的辅助函数
+function cleanMessageContent(content: string): string {
+  if (!content) return ''
+  return content.trim()
 }
 
 interface ChatPageProps {
@@ -107,6 +220,8 @@ const SessionItem = React.memo(function SessionItem({
 
 
 function ChatPage(_props: ChatPageProps) {
+  const navigate = useNavigate()
+
   const {
     isConnected,
     isConnecting,
@@ -132,15 +247,28 @@ function ChatPage(_props: ChatPageProps) {
     setLoadingMessages,
     setLoadingMore,
     setHasMoreMessages,
+    hasMoreLater,
+    setHasMoreLater,
     setSearchKeyword
   } = useChatStore()
 
   const messageListRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const sidebarRef = useRef<HTMLDivElement>(null)
+
+  const getMessageKey = useCallback((msg: Message): string => {
+    if (msg.localId && msg.localId > 0) return `l:${msg.localId}`
+    return `t:${msg.createTime}:${msg.sortSeq || 0}:${msg.serverId || 0}`
+  }, [])
   const initialRevealTimerRef = useRef<number | null>(null)
   const sessionListRef = useRef<HTMLDivElement>(null)
   const [currentOffset, setCurrentOffset] = useState(0)
+  const [jumpStartTime, setJumpStartTime] = useState(0)
+  const [jumpEndTime, setJumpEndTime] = useState(0)
+  const [showJumpDialog, setShowJumpDialog] = useState(false)
+  const [messageDates, setMessageDates] = useState<Set<string>>(new Set())
+  const [loadingDates, setLoadingDates] = useState(false)
+  const messageDatesCache = useRef<Map<string, Set<string>>>(new Map())
   const [myAvatarUrl, setMyAvatarUrl] = useState<string | undefined>(undefined)
   const [myWxid, setMyWxid] = useState<string | undefined>(undefined)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
@@ -149,11 +277,47 @@ function ChatPage(_props: ChatPageProps) {
   const [showDetailPanel, setShowDetailPanel] = useState(false)
   const [sessionDetail, setSessionDetail] = useState<SessionDetail | null>(null)
   const [isLoadingDetail, setIsLoadingDetail] = useState(false)
+  const [copiedField, setCopiedField] = useState<string | null>(null)
   const [highlightedMessageKeys, setHighlightedMessageKeys] = useState<string[]>([])
   const [isRefreshingSessions, setIsRefreshingSessions] = useState(false)
   const [hasInitialMessages, setHasInitialMessages] = useState(false)
+  const [noMessageTable, setNoMessageTable] = useState(false)
+  const [fallbackDisplayName, setFallbackDisplayName] = useState<string | null>(null)
   const [showVoiceTranscribeDialog, setShowVoiceTranscribeDialog] = useState(false)
   const [pendingVoiceTranscriptRequest, setPendingVoiceTranscriptRequest] = useState<{ sessionId: string; messageId: string } | null>(null)
+
+  // 消息右键菜单
+  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, message: Message } | null>(null)
+  const [editingMessage, setEditingMessage] = useState<{ message: Message, content: string } | null>(null)
+
+  // 多选模式
+  const [isSelectionMode, setIsSelectionMode] = useState(false)
+  const [selectedMessages, setSelectedMessages] = useState<Set<number>>(new Set())
+
+  // 编辑消息额外状态
+  const [editMode, setEditMode] = useState<'raw' | 'fields'>('raw')
+  const [tempFields, setTempFields] = useState<XmlField[]>([])
+
+  // 批量语音转文字相关状态（进度/结果 由全局 store 管理）
+  const { isBatchTranscribing, progress: batchTranscribeProgress, showToast: showBatchProgress, startTranscribe, updateProgress, finishTranscribe, setShowToast: setShowBatchProgress } = useBatchTranscribeStore()
+  const [showBatchConfirm, setShowBatchConfirm] = useState(false)
+  const [batchVoiceCount, setBatchVoiceCount] = useState(0)
+  const [batchVoiceMessages, setBatchVoiceMessages] = useState<Message[] | null>(null)
+  const [batchVoiceDates, setBatchVoiceDates] = useState<string[]>([])
+  const [batchSelectedDates, setBatchSelectedDates] = useState<Set<string>>(new Set())
+
+  // 批量删除相关状态
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteProgress, setDeleteProgress] = useState({ current: 0, total: 0 })
+  const [cancelDeleteRequested, setCancelDeleteRequested] = useState(false)
+
+  // 自定义删除确认对话框
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    show: boolean;
+    mode: 'single' | 'batch';
+    message?: Message;
+    count?: number;
+  }>({ show: false, mode: 'single' })
 
   // 联系人信息加载控制
   const isEnrichingRef = useRef(false)
@@ -172,6 +336,7 @@ function ChatPage(_props: ChatPageProps) {
   const isLoadingMessagesRef = useRef(false)
   const isLoadingMoreRef = useRef(false)
   const isConnectedRef = useRef(false)
+  const isRefreshingRef = useRef(false)
   const searchKeywordRef = useRef('')
   const preloadImageKeysRef = useRef<Set<string>>(new Set())
   const lastPreloadSessionRef = useRef<string | null>(null)
@@ -211,6 +376,25 @@ function ChatPage(_props: ChatPageProps) {
     setShowDetailPanel(!showDetailPanel)
   }, [showDetailPanel, currentSessionId, loadSessionDetail])
 
+  // 复制字段值到剪贴板
+  const handleCopyField = useCallback(async (text: string, field: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedField(field)
+      setTimeout(() => setCopiedField(null), 1500)
+    } catch {
+      // fallback
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+      setCopiedField(field)
+      setTimeout(() => setCopiedField(null), 1500)
+    }
+  }, [])
+
   // 连接数据库
   const connect = useCallback(async () => {
     setConnecting(true)
@@ -234,6 +418,43 @@ function ChatPage(_props: ChatPageProps) {
     }
   }, [loadMyAvatar])
 
+  const handleAccountChanged = useCallback(async () => {
+    senderAvatarCache.clear()
+    senderAvatarLoading.clear()
+    preloadImageKeysRef.current.clear()
+    lastPreloadSessionRef.current = null
+    setSessionDetail(null)
+    setCurrentSession(null)
+    setSessions([])
+    setFilteredSessions([])
+    setMessages([])
+    setSearchKeyword('')
+    setConnectionError(null)
+    setConnected(false)
+    setConnecting(false)
+    setHasMoreMessages(true)
+    setHasMoreLater(false)
+    await connect()
+  }, [
+    connect,
+    setConnected,
+    setConnecting,
+    setConnectionError,
+    setCurrentSession,
+    setFilteredSessions,
+    setHasMoreLater,
+    setHasMoreMessages,
+    setMessages,
+    setSearchKeyword,
+    setSessionDetail,
+    setSessions
+  ])
+
+  // 同步 currentSessionId 到 ref
+  useEffect(() => {
+    currentSessionRef.current = currentSessionId
+  }, [currentSessionId])
+
   // 加载会话列表（优化：先返回基础数据，异步加载联系人信息）
   const loadSessions = async (options?: { silent?: boolean }) => {
     if (options?.silent) {
@@ -249,7 +470,10 @@ function ChatPage(_props: ChatPageProps) {
         const nextSessions = options?.silent ? mergeSessions(sessionsArray) : sessionsArray
         // 确保 nextSessions 也是数组
         if (Array.isArray(nextSessions)) {
+
+
           setSessions(nextSessions)
+          sessionsRef.current = nextSessions
           // 立即启动联系人信息加载，不再延迟 500ms
           void enrichSessionsContactInfo(nextSessions)
         } else {
@@ -278,14 +502,14 @@ function ChatPage(_props: ChatPageProps) {
 
     // 防止重复加载
     if (isEnrichingRef.current) {
-      console.log('[性能监控] 联系人信息正在加载中，跳过重复请求')
+
       return
     }
 
     isEnrichingRef.current = true
     enrichCancelledRef.current = false
 
-    console.log(`[性能监控] 开始加载联系人信息，会话数: ${sessions.length}`)
+
     const totalStart = performance.now()
 
     // 移除初始 500ms 延迟，让后台加载与 UI 渲染并行
@@ -300,12 +524,12 @@ function ChatPage(_props: ChatPageProps) {
       // 找出需要加载联系人信息的会话（没有头像或者没有显示名称的）
       const needEnrich = sessions.filter(s => !s.avatarUrl || !s.displayName || s.displayName === s.username)
       if (needEnrich.length === 0) {
-        console.log('[性能监控] 所有联系人信息已缓存，跳过加载')
+
         isEnrichingRef.current = false
         return
       }
 
-      console.log(`[性能监控] 需要加载的联系人信息: ${needEnrich.length} 个`)
+
 
       // 进一步减少批次大小，每批3个，避免DLL调用阻塞
       const batchSize = 3
@@ -314,7 +538,7 @@ function ChatPage(_props: ChatPageProps) {
       for (let i = 0; i < needEnrich.length; i += batchSize) {
         // 如果正在滚动，暂停加载
         if (isScrollingRef.current) {
-          console.log('[性能监控] 检测到滚动，暂停加载联系人信息')
+
           // 等待滚动结束
           while (isScrollingRef.current && !enrichCancelledRef.current) {
             await new Promise(resolve => setTimeout(resolve, 200))
@@ -358,9 +582,9 @@ function ChatPage(_props: ChatPageProps) {
 
       const totalTime = performance.now() - totalStart
       if (!enrichCancelledRef.current) {
-        console.log(`[性能监控] 联系人信息加载完成，总耗时: ${totalTime.toFixed(2)}ms, 已加载: ${loadedCount}/${needEnrich.length}`)
+
       } else {
-        console.log(`[性能监控] 联系人信息加载被取消，已加载: ${loadedCount}/${needEnrich.length}`)
+
       }
     } catch (e) {
       console.error('加载联系人信息失败:', e)
@@ -439,7 +663,11 @@ function ChatPage(_props: ChatPageProps) {
       await new Promise(resolve => setTimeout(resolve, 0))
 
       const dllStart = performance.now()
-      const result = await window.electronAPI.chat.enrichSessionsContactInfo(usernames)
+      const result = await window.electronAPI.chat.enrichSessionsContactInfo(usernames) as {
+        success: boolean
+        contacts?: Record<string, { displayName?: string; avatarUrl?: string }>
+        error?: string
+      }
       const dllTime = performance.now() - dllStart
 
       // DLL 调用后再次让出控制权
@@ -452,12 +680,13 @@ function ChatPage(_props: ChatPageProps) {
 
       if (result.success && result.contacts) {
         // 将更新加入队列，用于侧边栏更新
-        for (const [username, contact] of Object.entries(result.contacts)) {
+        const contacts = result.contacts || {}
+        for (const [username, contact] of Object.entries(contacts)) {
           contactUpdateQueueRef.current.set(username, contact)
 
           // 如果是自己的信息且当前个人头像为空，同步更新
           if (myWxid && username === myWxid && contact.avatarUrl && !myAvatarUrl) {
-            console.log('[ChatPage] 从联系人同步获取到个人头像')
+
             setMyAvatarUrl(contact.avatarUrl)
           }
 
@@ -477,27 +706,90 @@ function ChatPage(_props: ChatPageProps) {
 
   // 刷新会话列表
   const handleRefresh = async () => {
+    setJumpStartTime(0)
+    setJumpEndTime(0)
+    setHasMoreLater(false)
     await loadSessions({ silent: true })
   }
 
   // 刷新当前会话消息（增量更新新消息）
   const [isRefreshingMessages, setIsRefreshingMessages] = useState(false)
-  const handleRefreshMessages = async () => {
-    if (!currentSessionId || isRefreshingMessages) return
+
+  /**
+   * 极速增量刷新：基于最后一条消息时间戳，获取后续新消息
+   * (由用户建议：记住上一条消息时间，自动取之后的并渲染，然后后台兜底全量同步)
+   */
+  const handleIncrementalRefresh = async () => {
+    if (!currentSessionId || isRefreshingRef.current) return
+    isRefreshingRef.current = true
     setIsRefreshingMessages(true)
+
+    // 找出当前已渲染消息中的最大时间戳（使用 getState 获取最新状态，避免闭包过时导致重复）
+    const currentMessages = useChatStore.getState().messages
+    const lastMsg = currentMessages[currentMessages.length - 1]
+    const minTime = lastMsg?.createTime || 0
+
+    // 1. 优先执行增量查询并渲染（第一步）
+    try {
+      const result = await (window.electronAPI.chat as any).getNewMessages(currentSessionId, minTime) as {
+        success: boolean;
+        messages?: Message[];
+        error?: string
+      }
+
+      if (result.success && result.messages && result.messages.length > 0) {
+        // 过滤去重：必须对比实时的状态，防止在 handleRefreshMessages 运行期间导致的冲突
+        const latestMessages = useChatStore.getState().messages
+        const existingKeys = new Set(latestMessages.map(getMessageKey))
+        const newOnes = result.messages.filter(m => !existingKeys.has(getMessageKey(m)))
+
+        if (newOnes.length > 0) {
+          appendMessages(newOnes, false)
+          flashNewMessages(newOnes.map(getMessageKey))
+          // 滚动到底部
+          requestAnimationFrame(() => {
+            if (messageListRef.current) {
+              messageListRef.current.scrollTop = messageListRef.current.scrollHeight
+            }
+          })
+        }
+      }
+    } catch (e) {
+      console.warn('[IncrementalRefresh] 失败，将依赖全量同步兜底:', e)
+    } finally {
+      isRefreshingRef.current = false
+      setIsRefreshingMessages(false)
+    }
+  }
+
+  const handleRefreshMessages = async () => {
+    if (!currentSessionId || isRefreshingRef.current) return
+    setJumpStartTime(0)
+    setJumpEndTime(0)
+    setHasMoreLater(false)
+    setIsRefreshingMessages(true)
+    isRefreshingRef.current = true
     try {
       // 获取最新消息并增量添加
-      const result = await window.electronAPI.chat.getLatestMessages(currentSessionId, 50)
+      const result = await window.electronAPI.chat.getLatestMessages(currentSessionId, 50) as {
+        success: boolean;
+        messages?: Message[];
+        error?: string
+      }
       if (!result.success || !result.messages) {
         return
       }
-      const existing = new Set(messages.map(getMessageKey))
-      const lastMsg = messages[messages.length - 1]
+      // 使用实时状态进行去重对比
+      const latestMessages = useChatStore.getState().messages
+      const existing = new Set(latestMessages.map(getMessageKey))
+      const lastMsg = latestMessages[latestMessages.length - 1]
       const lastTime = lastMsg?.createTime ?? 0
+
       const newMessages = result.messages.filter((msg) => {
         const key = getMessageKey(msg)
         if (existing.has(key)) return false
-        if (lastTime > 0 && msg.createTime < lastTime) return false
+        // 这里的 lastTime 仅作参考过滤，主要的去重靠 key
+        if (lastTime > 0 && msg.createTime < lastTime - 3600) return false // 仅过滤 1 小时之前的冗余请求
         return true
       })
       if (newMessages.length > 0) {
@@ -513,16 +805,39 @@ function ChatPage(_props: ChatPageProps) {
     } catch (e) {
       console.error('刷新消息失败:', e)
     } finally {
+      isRefreshingRef.current = false
       setIsRefreshingMessages(false)
     }
   }
 
+
+
+  // 动态游标批量大小控制
+  const currentBatchSizeRef = useRef(50)
+
   // 加载消息
-  const loadMessages = async (sessionId: string, offset = 0) => {
+  const loadMessages = async (sessionId: string, offset = 0, startTime = 0, endTime = 0) => {
     const listEl = messageListRef.current
     const session = sessionMapRef.current.get(sessionId)
     const unreadCount = session?.unreadCount ?? 0
-    const messageLimit = offset === 0 && unreadCount > 99 ? 30 : 50
+
+    let messageLimit = 50
+
+    if (offset === 0) {
+      // 初始加载：重置批量大小
+      currentBatchSizeRef.current = 50
+      // 首屏优化：消息过多时限制数量
+      messageLimit = unreadCount > 99 ? 30 : 50
+    } else {
+      // 滚动加载：动态递增 (50 -> 100 -> 200)
+      if (currentBatchSizeRef.current < 100) {
+        currentBatchSizeRef.current = 100
+      } else {
+        currentBatchSizeRef.current = 200
+      }
+      messageLimit = currentBatchSizeRef.current
+    }
+
 
     if (offset === 0) {
       setLoadingMessages(true)
@@ -535,10 +850,19 @@ function ChatPage(_props: ChatPageProps) {
     const firstMsgEl = listEl?.querySelector('.message-wrapper') as HTMLElement | null
 
     try {
-      const result = await window.electronAPI.chat.getMessages(sessionId, offset, messageLimit)
+      const result = await window.electronAPI.chat.getMessages(sessionId, offset, messageLimit, startTime, endTime) as {
+        success: boolean;
+        messages?: Message[];
+        hasMore?: boolean;
+        error?: string
+      }
       if (result.success && result.messages) {
         if (offset === 0) {
           setMessages(result.messages)
+          if (result.messages.length === 0) {
+            setNoMessageTable(true)
+            setHasMoreMessages(false)
+          }
 
           // 预取发送者信息：在关闭加载遮罩前处理
           const unreadCount = session?.unreadCount ?? 0
@@ -549,7 +873,7 @@ function ChatPage(_props: ChatPageProps) {
               .map(m => m.senderUsername as string)
             )]
             if (unknownSenders.length > 0) {
-              console.log(`[性能监控] 预取消息发送者信息: ${unknownSenders.length} 个`)
+
               // 在批量请求前，先将这些发送者标记为加载中，防止 MessageBubble 触发重复请求
               const batchPromise = loadContactInfoBatch(unknownSenders)
               unknownSenders.forEach(username => {
@@ -601,9 +925,17 @@ function ChatPage(_props: ChatPageProps) {
           }
         }
         setHasMoreMessages(result.hasMore ?? false)
+        // 如果是按 endTime 跳转加载，且结果刚好满批，可能后面（更晚）还有消息
+        if (offset === 0) {
+          if (endTime > 0) {
+            setHasMoreLater(true)
+          } else {
+            setHasMoreLater(false)
+          }
+        }
         setCurrentOffset(offset + result.messages.length)
       } else if (!result.success) {
-        setConnectionError(result.error || '加载消息失败')
+        setNoMessageTable(true)
         setHasMoreMessages(false)
       }
     } catch (e) {
@@ -616,12 +948,46 @@ function ChatPage(_props: ChatPageProps) {
     }
   }
 
+  // 加载更晚的消息
+  const loadLaterMessages = useCallback(async () => {
+    if (!currentSessionId || isLoadingMore || isLoadingMessages || messages.length === 0) return
+
+    setLoadingMore(true)
+    try {
+      const lastMsg = messages[messages.length - 1]
+      // 从最后一条消息的时间开始往后找
+      const result = await window.electronAPI.chat.getMessages(currentSessionId, 0, 50, lastMsg.createTime, 0, true) as {
+        success: boolean;
+        messages?: Message[];
+        hasMore?: boolean;
+        error?: string
+      }
+
+      if (result.success && result.messages) {
+        // 过滤掉已经在列表中的重复消息
+        const existingKeys = messageKeySetRef.current
+        const newMsgs = result.messages.filter(m => !existingKeys.has(getMessageKey(m)))
+
+        if (newMsgs.length > 0) {
+          appendMessages(newMsgs, false)
+        }
+        setHasMoreLater(result.hasMore ?? false)
+      }
+    } catch (e) {
+      console.error('加载后续消息失败:', e)
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [currentSessionId, isLoadingMore, isLoadingMessages, messages, getMessageKey, appendMessages, setHasMoreLater, setLoadingMore])
+
   // 选择会话
   const handleSelectSession = (session: ChatSession) => {
     if (session.username === currentSessionId) return
     setCurrentSession(session.username)
     setCurrentOffset(0)
-    loadMessages(session.username, 0)
+    setJumpStartTime(0)
+    setJumpEndTime(0)
+    loadMessages(session.username, 0, 0, 0)
     // 重置详情面板
     setSessionDetail(null)
     if (showDetailPanel) {
@@ -678,16 +1044,21 @@ function ChatPage(_props: ChatPageProps) {
       if (!isLoadingMore && !isLoadingMessages && hasMoreMessages && currentSessionId) {
         const threshold = clientHeight * 0.3
         if (scrollTop < threshold) {
-          loadMessages(currentSessionId, currentOffset)
+          loadMessages(currentSessionId, currentOffset, jumpStartTime, jumpEndTime)
+        }
+      }
+
+      // 预加载更晚的消息
+      if (!isLoadingMore && !isLoadingMessages && hasMoreLater && currentSessionId) {
+        const threshold = clientHeight * 0.3
+        const distanceFromBottom = scrollHeight - scrollTop - clientHeight
+        if (distanceFromBottom < threshold) {
+          loadLaterMessages()
         }
       }
     })
-  }, [isLoadingMore, isLoadingMessages, hasMoreMessages, currentSessionId, currentOffset, loadMessages])
+  }, [isLoadingMore, isLoadingMessages, hasMoreMessages, hasMoreLater, currentSessionId, currentOffset, jumpStartTime, jumpEndTime, loadMessages, loadLaterMessages])
 
-  const getMessageKey = useCallback((msg: Message): string => {
-    if (msg.localId && msg.localId > 0) return `l:${msg.localId}`
-    return `t:${msg.createTime}:${msg.sortSeq || 0}:${msg.serverId || 0}`
-  }, [])
 
   const isSameSession = useCallback((prev: ChatSession, next: ChatSession): boolean => {
     return (
@@ -784,6 +1155,14 @@ function ChatPage(_props: ChatPageProps) {
   }, [])
 
   useEffect(() => {
+    const handleChange = () => {
+      void handleAccountChanged()
+    }
+    window.addEventListener('wxid-changed', handleChange as EventListener)
+    return () => window.removeEventListener('wxid-changed', handleChange as EventListener)
+  }, [handleAccountChanged])
+
+  useEffect(() => {
     const nextSet = new Set<string>()
     for (const msg of messages) {
       nextSet.add(getMessageKey(msg))
@@ -874,6 +1253,7 @@ function ChatPage(_props: ChatPageProps) {
   useEffect(() => {
     if (currentSessionId !== prevSessionRef.current) {
       prevSessionRef.current = currentSessionId
+      setNoMessageTable(false)
       if (initialRevealTimerRef.current !== null) {
         window.clearTimeout(initialRevealTimerRef.current)
         initialRevealTimerRef.current = null
@@ -887,10 +1267,11 @@ function ChatPage(_props: ChatPageProps) {
   }, [currentSessionId, messages.length, isLoadingMessages])
 
   useEffect(() => {
-    if (currentSessionId && messages.length === 0 && !isLoadingMessages && !isLoadingMore) {
+    if (currentSessionId && messages.length === 0 && !isLoadingMessages && !isLoadingMore && !noMessageTable) {
+      setHasInitialMessages(false)
       loadMessages(currentSessionId, 0)
     }
-  }, [currentSessionId, messages.length, isLoadingMessages, isLoadingMore])
+  }, [currentSessionId, messages.length, isLoadingMessages, isLoadingMore, noMessageTable])
 
   useEffect(() => {
     return () => {
@@ -954,8 +1335,35 @@ function ChatPage(_props: ChatPageProps) {
     return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`
   }, [])
 
-  // 获取当前会话信息
-  const currentSession = Array.isArray(sessions) ? sessions.find(s => s.username === currentSessionId) : undefined
+  // 获取当前会话信息（从通讯录跳转时可能不在 sessions 列表中，构造 fallback）
+  const currentSession = (() => {
+    const found = Array.isArray(sessions) ? sessions.find(s => s.username === currentSessionId) : undefined
+    if (found || !currentSessionId) return found
+    return {
+      username: currentSessionId,
+      type: 0,
+      unreadCount: 0,
+      summary: '',
+      sortTimestamp: 0,
+      lastTimestamp: 0,
+      lastMsgType: 0,
+      displayName: fallbackDisplayName || currentSessionId,
+    } as ChatSession
+  })()
+
+  // 从通讯录跳转时，会话不在列表中，主动加载联系人显示名称
+  useEffect(() => {
+    if (!currentSessionId) return
+    const found = Array.isArray(sessions) ? sessions.find(s => s.username === currentSessionId) : undefined
+    if (found) {
+      setFallbackDisplayName(null)
+      return
+    }
+    loadContactInfoBatch([currentSessionId]).then(() => {
+      const cached = senderAvatarCache.get(currentSessionId)
+      if (cached?.displayName) setFallbackDisplayName(cached.displayName)
+    })
+  }, [currentSessionId, sessions])
 
   // 判断是否为群聊
   const isGroupChat = (username: string) => username.includes('@chatroom')
@@ -992,8 +1400,458 @@ function ChatPage(_props: ChatPageProps) {
     setShowVoiceTranscribeDialog(true)
   }, [])
 
+  // 批量语音转文字
+  const handleBatchTranscribe = useCallback(async () => {
+    if (!currentSessionId) return
+    const session = sessions.find(s => s.username === currentSessionId)
+    if (!session) {
+      alert('未找到当前会话')
+      return
+    }
+    if (isBatchTranscribing) return
+
+    const result = await window.electronAPI.chat.getAllVoiceMessages(currentSessionId)
+    if (!result.success || !result.messages) {
+      alert(`获取语音消息失败: ${result.error || '未知错误'}`)
+      return
+    }
+
+    const voiceMessages: Message[] = result.messages
+    if (voiceMessages.length === 0) {
+      alert('当前会话没有语音消息')
+      return
+    }
+
+    const dateSet = new Set<string>()
+    voiceMessages.forEach(m => dateSet.add(new Date(m.createTime * 1000).toISOString().slice(0, 10)))
+    const sortedDates = Array.from(dateSet).sort((a, b) => b.localeCompare(a))
+
+    setBatchVoiceMessages(voiceMessages)
+    setBatchVoiceCount(voiceMessages.length)
+    setBatchVoiceDates(sortedDates)
+    setBatchSelectedDates(new Set(sortedDates))
+    setShowBatchConfirm(true)
+  }, [sessions, currentSessionId, isBatchTranscribing])
+
+  const handleExportCurrentSession = useCallback(() => {
+    if (!currentSessionId) return
+    navigate('/export', {
+      state: {
+        preselectSessionIds: [currentSessionId]
+      }
+    })
+  }, [currentSessionId, navigate])
+
+  const handleGroupAnalytics = useCallback(() => {
+    if (!currentSessionId || !isGroupChat(currentSessionId)) return
+    navigate('/group-analytics', {
+      state: {
+        preselectGroupIds: [currentSessionId]
+      }
+    })
+  }, [currentSessionId, navigate])
+
+  // 确认批量转写
+  const confirmBatchTranscribe = useCallback(async () => {
+    if (!currentSessionId) return
+
+    const selected = batchSelectedDates
+    if (selected.size === 0) {
+      alert('请至少选择一个日期')
+      return
+    }
+
+    const messages = batchVoiceMessages
+    if (!messages || messages.length === 0) {
+      setShowBatchConfirm(false)
+      return
+    }
+
+    const voiceMessages = messages.filter(m =>
+      selected.has(new Date(m.createTime * 1000).toISOString().slice(0, 10))
+    )
+    if (voiceMessages.length === 0) {
+      alert('所选日期下没有语音消息')
+      return
+    }
+
+    setShowBatchConfirm(false)
+    setBatchVoiceMessages(null)
+    setBatchVoiceDates([])
+    setBatchSelectedDates(new Set())
+
+    const session = sessions.find(s => s.username === currentSessionId)
+    if (!session) return
+
+    startTranscribe(voiceMessages.length, session.displayName || session.username)
+
+    // 检查模型状态
+    const modelStatus = await window.electronAPI.whisper.getModelStatus()
+    if (!modelStatus?.exists) {
+      alert('SenseVoice 模型未下载，请先在设置中下载模型')
+      finishTranscribe(0, 0)
+      return
+    }
+
+    let successCount = 0
+    let failCount = 0
+    let completedCount = 0
+    const concurrency = 10
+
+    const transcribeOne = async (msg: Message) => {
+      try {
+        const result = await window.electronAPI.chat.getVoiceTranscript(
+          session.username,
+          String(msg.localId),
+          msg.createTime
+        )
+        return { success: result.success }
+      } catch {
+        return { success: false }
+      }
+    }
+
+    for (let i = 0; i < voiceMessages.length; i += concurrency) {
+      const batch = voiceMessages.slice(i, i + concurrency)
+      const results = await Promise.all(batch.map(msg => transcribeOne(msg)))
+
+      results.forEach(result => {
+        if (result.success) successCount++
+        else failCount++
+        completedCount++
+        updateProgress(completedCount, voiceMessages.length)
+      })
+    }
+
+    finishTranscribe(successCount, failCount)
+  }, [sessions, currentSessionId, batchSelectedDates, batchVoiceMessages, startTranscribe, updateProgress, finishTranscribe])
+
+  // 批量转写：按日期的消息数量
+  const batchCountByDate = useMemo(() => {
+    const map = new Map<string, number>()
+    if (!batchVoiceMessages) return map
+    batchVoiceMessages.forEach(m => {
+      const d = new Date(m.createTime * 1000).toISOString().slice(0, 10)
+      map.set(d, (map.get(d) || 0) + 1)
+    })
+    return map
+  }, [batchVoiceMessages])
+
+  // 批量转写：选中日期对应的语音条数
+  const batchSelectedMessageCount = useMemo(() => {
+    if (!batchVoiceMessages) return 0
+    return batchVoiceMessages.filter(m =>
+      batchSelectedDates.has(new Date(m.createTime * 1000).toISOString().slice(0, 10))
+    ).length
+  }, [batchVoiceMessages, batchSelectedDates])
+
+  const toggleBatchDate = useCallback((date: string) => {
+    setBatchSelectedDates(prev => {
+      const next = new Set(prev)
+      if (next.has(date)) next.delete(date)
+      else next.add(date)
+      return next
+    })
+  }, [])
+  const selectAllBatchDates = useCallback(() => setBatchSelectedDates(new Set(batchVoiceDates)), [batchVoiceDates])
+  const clearAllBatchDates = useCallback(() => setBatchSelectedDates(new Set()), [])
+
+  const lastSelectedIdRef = useRef<number | null>(null)
+
+  const handleToggleSelection = useCallback((localId: number, isShiftKey: boolean = false) => {
+    setSelectedMessages(prev => {
+      const next = new Set(prev)
+
+      // Range selection with Shift key
+      if (isShiftKey && lastSelectedIdRef.current !== null && lastSelectedIdRef.current !== localId) {
+        const currentMsgs = useChatStore.getState().messages
+        const idx1 = currentMsgs.findIndex(m => m.localId === lastSelectedIdRef.current)
+        const idx2 = currentMsgs.findIndex(m => m.localId === localId)
+
+        if (idx1 !== -1 && idx2 !== -1) {
+          const start = Math.min(idx1, idx2)
+          const end = Math.max(idx1, idx2)
+          for (let i = start; i <= end; i++) {
+            next.add(currentMsgs[i].localId)
+          }
+        }
+      } else {
+        // Normal toggle
+        if (next.has(localId)) {
+          next.delete(localId)
+          lastSelectedIdRef.current = null // Reset last selection on uncheck? Or keep? Usually keep last interaction.
+        } else {
+          next.add(localId)
+          lastSelectedIdRef.current = localId
+        }
+      }
+      return next
+    })
+  }, [])
+
+  const formatBatchDateLabel = useCallback((dateStr: string) => {
+    const [y, m, d] = dateStr.split('-').map(Number)
+    return `${y}年${m}月${d}日`
+  }, [])
+
+  // 消息右键菜单处理
+  const handleContextMenu = useCallback((e: React.MouseEvent, message: Message) => {
+    e.preventDefault()
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      message
+    })
+  }, [])
+
+  // 关闭右键菜单
+  useEffect(() => {
+    const handleClick = () => {
+      setContextMenu(null)
+    }
+    window.addEventListener('click', handleClick)
+    return () => {
+      window.removeEventListener('click', handleClick)
+    }
+  }, [])
+
+  // 删除消息 - 触发确认弹窗
+  const handleDelete = useCallback((target: { message: Message } | null = null) => {
+    const msg = target?.message || contextMenu?.message
+    if (!currentSessionId || !msg) return
+
+    setDeleteConfirm({
+      show: true,
+      mode: 'single',
+      message: msg
+    })
+    setContextMenu(null)
+  }, [contextMenu, currentSessionId])
+
+  // 执行单条删除动作
+  const performSingleDelete = async (msg: Message) => {
+    try {
+      const dbPathHint = (msg as any)._db_path
+      const result = await (window as any).electronAPI.chat.deleteMessage(currentSessionId, msg.localId, msg.createTime, dbPathHint)
+      if (result.success) {
+        const currentMessages = useChatStore.getState().messages
+        const newMessages = currentMessages.filter(m => m.localId !== msg.localId)
+        useChatStore.getState().setMessages(newMessages)
+      } else {
+        alert('删除失败: ' + (result.error || '原因未知'))
+      }
+    } catch (e) {
+      console.error(e)
+      alert('删除异常: ' + String(e))
+    }
+  }
+
+  // 修改消息
+  const handleEditMessage = useCallback(() => {
+    if (contextMenu) {
+      // 允许编辑所有类型的消息
+      // 如果是文本消息(1)，使用 parsedContent
+      // 如果是其他类型(如系统消息 10000)，使用 rawContent 或 content 作为 XML 源码编辑
+      const isText = contextMenu.message.localType === 1
+      const rawXml = contextMenu.message.content || (contextMenu.message as any).rawContent || contextMenu.message.parsedContent || ''
+
+      const contentToEdit = isText
+        ? cleanMessageContent(contextMenu.message.parsedContent)
+        : rawXml
+
+      if (!isText) {
+        const fields = parseXmlToFields(rawXml)
+        setTempFields(fields)
+        setEditMode(fields.length > 0 ? 'fields' : 'raw')
+      } else {
+        setEditMode('raw')
+        setTempFields([])
+      }
+
+      setEditingMessage({
+        message: contextMenu.message,
+        content: contentToEdit
+      })
+      setContextMenu(null)
+    }
+  }, [contextMenu])
+
+  // 确认修改消息
+  const handleSaveEdit = useCallback(async () => {
+    if (editingMessage && currentSessionId) {
+      let finalContent = editingMessage.content
+
+      // 如果是字段编辑模式，先同步回 XML
+      if (editMode === 'fields' && tempFields.length > 0) {
+        finalContent = updateXmlWithFields(editingMessage.content, tempFields)
+      }
+
+      if (!finalContent.trim()) {
+        handleDelete({ message: editingMessage.message })
+        setEditingMessage(null)
+        return
+      }
+
+      try {
+        const result = await (window as any).electronAPI.chat.updateMessage(currentSessionId, editingMessage.message.localId, editingMessage.message.createTime, finalContent)
+        if (result.success) {
+          const currentMessages = useChatStore.getState().messages
+          const newMessages = currentMessages.map(m => {
+            if (m.localId === editingMessage.message.localId) {
+              return { ...m, parsedContent: finalContent, content: finalContent, rawContent: finalContent }
+            }
+            return m
+          })
+          useChatStore.getState().setMessages(newMessages)
+          setEditingMessage(null)
+        } else {
+          alert('修改失败: ' + result.error)
+        }
+      } catch (e) {
+        alert('修改异常: ' + String(e))
+      }
+    }
+  }, [editingMessage, currentSessionId, editMode, tempFields, handleDelete])
+
+  // 用于在异步循环中获取最新的取消状态
+  const cancelDeleteRef = useRef(false)
+
+  const handleBatchDelete = () => {
+    if (selectedMessages.size === 0) {
+      alert('请先选择要删除的消息')
+      return
+    }
+    if (!currentSessionId) return
+
+    setDeleteConfirm({
+      show: true,
+      mode: 'batch',
+      count: selectedMessages.size
+    })
+  }
+
+  const performBatchDelete = async () => {
+    setIsDeleting(true)
+    setDeleteProgress({ current: 0, total: selectedMessages.size })
+    setCancelDeleteRequested(false)
+    cancelDeleteRef.current = false
+
+    try {
+      const currentMessages = useChatStore.getState().messages
+      const selectedIds = Array.from(selectedMessages)
+      const deletedIds = new Set<number>()
+
+      for (let i = 0; i < selectedIds.length; i++) {
+        if (cancelDeleteRef.current) break
+
+        const id = selectedIds[i]
+        const msgObj = currentMessages.find(m => m.localId === id)
+        const dbPathHint = (msgObj as any)?._db_path
+        const createTime = msgObj?.createTime || 0
+
+        try {
+          const result = await (window as any).electronAPI.chat.deleteMessage(currentSessionId, id, createTime, dbPathHint)
+          if (result.success) {
+            deletedIds.add(id)
+          }
+        } catch (err) {
+          console.error(`删除消息 ${id} 失败:`, err)
+        }
+
+        setDeleteProgress({ current: i + 1, total: selectedIds.length })
+      }
+
+      const finalMessages = useChatStore.getState().messages.filter(m => !deletedIds.has(m.localId))
+      useChatStore.getState().setMessages(finalMessages)
+
+      setIsSelectionMode(false)
+      setSelectedMessages(new Set())
+
+      if (cancelDeleteRef.current) {
+        alert(`操作已中止。已删除 ${deletedIds.size} 条，剩余记录保留。`)
+      }
+    } catch (e) {
+      alert('批量删除出现错误: ' + String(e))
+      console.error(e)
+    } finally {
+      setIsDeleting(false)
+      setCancelDeleteRequested(false)
+      cancelDeleteRef.current = false
+    }
+  }
+
   return (
     <div className={`chat-page ${isResizing ? 'resizing' : ''}`}>
+      {/* 自定义删除确认对话框 */}
+      {deleteConfirm.show && (
+        <div className="delete-confirm-overlay">
+          <div className="delete-confirm-card">
+            <div className="confirm-icon">
+              <Trash2 size={32} color="var(--danger)" />
+            </div>
+            <div className="confirm-content">
+              <h3>确认删除</h3>
+              <p>
+                {deleteConfirm.mode === 'single'
+                  ? '确定要删除这条消息吗？此操作不可恢复。'
+                  : `确定要删除选中的 ${deleteConfirm.count} 条消息吗？`}
+              </p>
+            </div>
+            <div className="confirm-actions">
+              <button
+                className="btn-secondary"
+                onClick={() => setDeleteConfirm({ ...deleteConfirm, show: false })}
+              >
+                取消
+              </button>
+              <button
+                className="btn-danger-filled"
+                onClick={() => {
+                  setDeleteConfirm({ ...deleteConfirm, show: false });
+                  if (deleteConfirm.mode === 'single' && deleteConfirm.message) {
+                    performSingleDelete(deleteConfirm.message);
+                  } else if (deleteConfirm.mode === 'batch') {
+                    performBatchDelete();
+                  }
+                }}
+              >
+                确定删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 批量删除进度遮罩 */}
+      {isDeleting && (
+        <div className="delete-progress-overlay">
+          <div className="delete-progress-card">
+            <div className="progress-header">
+              <h3>正在彻底删除消息...</h3>
+              <span className="count">{deleteProgress.current} / {deleteProgress.total}</span>
+            </div>
+            <div className="progress-bar-container">
+              <div
+                className="progress-bar-fill"
+                style={{ width: `${(deleteProgress.current / deleteProgress.total) * 100}%` }}
+              />
+            </div>
+            <div className="progress-footer">
+              <p>请勿关闭应用或切换会话，确保所有副本都被清理。</p>
+              <button
+                className="cancel-delete-btn"
+                onClick={() => {
+                  setCancelDeleteRequested(true)
+                  cancelDeleteRef.current = true
+                }}
+                disabled={cancelDeleteRequested}
+              >
+                {cancelDeleteRequested ? '正在停止...' : '中止删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* 左侧会话列表 */}
       <div
         className="session-sidebar"
@@ -1102,6 +1960,86 @@ function ChatPage(_props: ChatPageProps) {
                 )}
               </div>
               <div className="header-actions">
+                {isGroupChat(currentSession.username) && (
+                  <button
+                    className="icon-btn group-analytics-btn"
+                    onClick={handleGroupAnalytics}
+                    title="群聊分析"
+                  >
+                    <BarChart3 size={18} />
+                  </button>
+                )}
+                <button
+                  className="icon-btn export-session-btn"
+                  onClick={handleExportCurrentSession}
+                  disabled={!currentSessionId}
+                  title="导出当前会话"
+                >
+                  <Download size={18} />
+                </button>
+                <button
+                  className={`icon-btn batch-transcribe-btn${isBatchTranscribing ? ' transcribing' : ''}`}
+                  onClick={() => {
+                    if (isBatchTranscribing) {
+                      setShowBatchProgress(true)
+                    } else {
+                      handleBatchTranscribe()
+                    }
+                  }}
+                  disabled={!currentSessionId}
+                  title={isBatchTranscribing ? `批量转写中 (${batchTranscribeProgress.current}/${batchTranscribeProgress.total})，点击查看进度` : '批量语音转文字'}
+                >
+                  {isBatchTranscribing ? (
+                    <Loader2 size={18} className="spin" />
+                  ) : (
+                    <Mic size={18} />
+                  )}
+                </button>
+                <button
+                  className="icon-btn jump-to-time-btn"
+                  onClick={async () => {
+                    setShowJumpDialog(true)
+                    if (!currentSessionId) return
+                    // 检查缓存
+                    const cached = messageDatesCache.current.get(currentSessionId)
+                    if (cached) {
+                      setMessageDates(cached)
+                      return
+                    }
+                    // 获取消息日期
+                    setMessageDates(new Set()) // 清除旧数据
+                    setLoadingDates(true)
+                    try {
+                      const result = await (window as any).electronAPI.chat.getMessageDates(currentSessionId)
+                      if (result?.success && result.dates) {
+                        const dateSet = new Set<string>(result.dates)
+                        setMessageDates(dateSet)
+                        messageDatesCache.current.set(currentSessionId, dateSet)
+                      }
+                    } catch (e) {
+                      console.error('获取消息日期失败:', e)
+                    } finally {
+                      setLoadingDates(false)
+                    }
+                  }}
+                  title="跳转到指定时间"
+                >
+                  <Calendar size={18} />
+                </button>
+                <JumpToDateDialog
+                  isOpen={showJumpDialog}
+                  onClose={() => setShowJumpDialog(false)}
+                  onSelect={(date) => {
+                    if (!currentSessionId) return
+                    const end = Math.floor(date.setHours(23, 59, 59, 999) / 1000)
+                    setCurrentOffset(0)
+                    setJumpStartTime(0)
+                    setJumpEndTime(end)
+                    loadMessages(currentSessionId, 0, 0, end)
+                  }}
+                  messageDates={messageDates}
+                  loadingDates={loadingDates}
+                />
                 <button
                   className="icon-btn refresh-messages-btn"
                   onClick={handleRefreshMessages}
@@ -1145,6 +2083,13 @@ function ChatPage(_props: ChatPageProps) {
                   </div>
                 )}
 
+                {!isLoadingMessages && messages.length === 0 && !hasMoreMessages && (
+                  <div className="empty-chat-inline">
+                    <MessageSquare size={32} />
+                    <span>该联系人没有聊天记录</span>
+                  </div>
+                )}
+
                 {messages.map((msg, index) => {
                   const prevMsg = index > 0 ? messages[index - 1] : undefined
                   const showDateDivider = shouldShowDateDivider(msg, prevMsg)
@@ -1172,10 +2117,27 @@ function ChatPage(_props: ChatPageProps) {
                         myAvatarUrl={myAvatarUrl}
                         isGroupChat={isGroupChat(currentSession.username)}
                         onRequireModelDownload={handleRequireModelDownload}
+                        onContextMenu={handleContextMenu}
+                        isSelectionMode={isSelectionMode}
+                        isSelected={selectedMessages.has(msg.localId)}
+                        onToggleSelection={handleToggleSelection}
                       />
                     </div>
                   )
                 })}
+
+                {hasMoreLater && (
+                  <div className={`load-more-trigger later ${isLoadingMore ? 'loading' : ''}`}>
+                    {isLoadingMore ? (
+                      <>
+                        <Loader2 size={14} />
+                        <span>正在加载后续消息...</span>
+                      </>
+                    ) : (
+                      <span>向下滚动查看更新消息</span>
+                    )}
+                  </div>
+                )}
 
                 {/* 回到底部按钮 */}
                 <div className={`scroll-to-bottom ${showScrollToBottom ? 'show' : ''}`} onClick={scrollToBottom}>
@@ -1205,23 +2167,35 @@ function ChatPage(_props: ChatPageProps) {
                           <Hash size={14} />
                           <span className="label">微信ID</span>
                           <span className="value">{sessionDetail.wxid}</span>
+                          <button className="copy-btn" title="复制" onClick={() => handleCopyField(sessionDetail.wxid, 'wxid')}>
+                            {copiedField === 'wxid' ? <Check size={12} /> : <Copy size={12} />}
+                          </button>
                         </div>
                         {sessionDetail.remark && (
                           <div className="detail-item">
                             <span className="label">备注</span>
                             <span className="value">{sessionDetail.remark}</span>
+                            <button className="copy-btn" title="复制" onClick={() => handleCopyField(sessionDetail.remark!, 'remark')}>
+                              {copiedField === 'remark' ? <Check size={12} /> : <Copy size={12} />}
+                            </button>
                           </div>
                         )}
                         {sessionDetail.nickName && (
                           <div className="detail-item">
                             <span className="label">昵称</span>
                             <span className="value">{sessionDetail.nickName}</span>
+                            <button className="copy-btn" title="复制" onClick={() => handleCopyField(sessionDetail.nickName!, 'nickName')}>
+                              {copiedField === 'nickName' ? <Check size={12} /> : <Copy size={12} />}
+                            </button>
                           </div>
                         )}
                         {sessionDetail.alias && (
                           <div className="detail-item">
                             <span className="label">微信号</span>
                             <span className="value">{sessionDetail.alias}</span>
+                            <button className="copy-btn" title="复制" onClick={() => handleCopyField(sessionDetail.alias!, 'alias')}>
+                              {copiedField === 'alias' ? <Check size={12} /> : <Copy size={12} />}
+                            </button>
                           </div>
                         )}
                       </div>
@@ -1319,8 +2293,277 @@ function ChatPage(_props: ChatPageProps) {
           }}
         />
       )}
+
+      {/* 批量转写确认对话框 */}
+      {showBatchConfirm && createPortal(
+        <div className="batch-modal-overlay" onClick={() => setShowBatchConfirm(false)}>
+          <div className="batch-modal-content batch-confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="batch-modal-header">
+              <Mic size={20} />
+              <h3>批量语音转文字</h3>
+            </div>
+            <div className="batch-modal-body">
+              <p>选择要转写的日期（仅显示有语音的日期），然后开始转写。</p>
+              {batchVoiceDates.length > 0 && (
+                <div className="batch-dates-list-wrap">
+                  <div className="batch-dates-actions">
+                    <button type="button" className="batch-dates-btn" onClick={selectAllBatchDates}>全选</button>
+                    <button type="button" className="batch-dates-btn" onClick={clearAllBatchDates}>取消全选</button>
+                  </div>
+                  <ul className="batch-dates-list">
+                    {batchVoiceDates.map(dateStr => {
+                      const count = batchCountByDate.get(dateStr) ?? 0
+                      const checked = batchSelectedDates.has(dateStr)
+                      return (
+                        <li key={dateStr}>
+                          <label className="batch-date-row">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleBatchDate(dateStr)}
+                            />
+                            <span className="batch-date-label">{formatBatchDateLabel(dateStr)}</span>
+                            <span className="batch-date-count">{count} 条语音</span>
+                          </label>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </div>
+              )}
+              <div className="batch-info">
+                <div className="info-item">
+                  <span className="label">已选:</span>
+                  <span className="value">{batchSelectedDates.size} 天有语音，共 {batchSelectedMessageCount} 条语音</span>
+                </div>
+                <div className="info-item">
+                  <span className="label">预计耗时:</span>
+                  <span className="value">约 {Math.ceil(batchSelectedMessageCount * 2 / 60)} 分钟</span>
+                </div>
+              </div>
+              <div className="batch-warning">
+                <AlertCircle size={16} />
+                <span>批量转写可能需要较长时间，转写过程中可以继续使用其他功能。已转写过的语音会自动跳过。</span>
+              </div>
+            </div>
+            <div className="batch-modal-footer">
+              <button className="btn-secondary" onClick={() => setShowBatchConfirm(false)}>
+                取消
+              </button>
+              <button className="btn-primary batch-transcribe-start-btn" onClick={confirmBatchTranscribe}>
+                <Mic size={16} />
+                开始转写
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+      {/* 消息右键菜单 */}
+      {contextMenu && createPortal(
+        <>
+          <div className="context-menu-overlay" onClick={() => setContextMenu(null)}
+            style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9998 }} />
+          <div
+            className="context-menu"
+            style={{
+              position: 'fixed',
+              top: contextMenu.y,
+              left: contextMenu.x,
+              zIndex: 9999
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="menu-item" onClick={handleEditMessage}>
+              <Edit2 size={16} />
+              <span>{contextMenu.message.localType === 1 ? '修改消息' : '编辑源码'}</span>
+            </div>
+            <div className="menu-item" onClick={() => {
+              setIsSelectionMode(true)
+              setSelectedMessages(new Set([contextMenu.message.localId]))
+              setContextMenu(null)
+            }}>
+              <CheckSquare size={16} />
+              <span>多选</span>
+            </div>
+            <div className="menu-item delete" onClick={(e) => { e.stopPropagation(); handleDelete() }}>
+              <Trash2 size={16} />
+              <span>删除消息</span>
+            </div>
+          </div>
+        </>,
+        document.body
+      )}
+
+      {/* 修改消息弹窗 */}
+      {editingMessage && createPortal(
+        <div className="modal-overlay">
+          <div className="modal-content edit-message-modal">
+            <div className="modal-header">
+              <h3 style={{ margin: 0 }}>{editingMessage.message.localType === 1 ? '修改消息' : '编辑消息'}</h3>
+              <button className="close-btn" onClick={() => setEditingMessage(null)}>
+                <X size={16} />
+              </button>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+              {editMode === 'raw' ? (
+                <textarea
+                  className="edit-message-textarea"
+                  style={{ fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' }}
+                  value={editingMessage.content}
+                  onChange={(e) => setEditingMessage({ ...editingMessage, content: e.target.value })}
+                  rows={editingMessage.message.localType === 1 ? 8 : 15}
+                />
+              ) : (
+                <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  {tempFields.map((field, idx) => (
+                    <div key={idx} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 500 }}>
+                          {field.tagName ? field.tagName : '节点'}: <span style={{ color: 'var(--primary)' }}>{field.key}</span>
+                        </span>
+                        <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', opacity: 0.6 }}>
+                          {field.type === 'attr' ? '属性' : '文本内容'}
+                        </span>
+                      </div>
+                      <input
+                        type="text"
+                        value={field.value}
+                        onChange={(e) => {
+                          const newFields = [...tempFields]
+                          newFields[idx].value = e.target.value
+                          setTempFields(newFields)
+                        }}
+                        style={{
+                          background: 'var(--bg-tertiary)',
+                          border: '1px solid var(--border-color)',
+                          borderRadius: '6px',
+                          padding: '10px 12px',
+                          color: 'var(--text-primary)',
+                          fontSize: '13px',
+                          outline: 'none',
+                          width: '100%',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
+              <div>
+                {editingMessage.message.localType !== 1 && tempFields.length > 0 && (
+                  <button
+                    onClick={() => setEditMode(editMode === 'raw' ? 'fields' : 'raw')}
+                    style={{
+                      padding: '6px 12px',
+                      fontSize: '12px',
+                      borderRadius: '6px',
+                      border: '1px solid var(--border-color)',
+                      background: editMode === 'fields' ? 'var(--primary)' : 'transparent',
+                      color: editMode === 'fields' ? '#fff' : 'var(--text-secondary)',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    {editMode === 'raw' ? '可视化编辑' : '源码编辑'}
+                  </button>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <button className="btn-secondary" onClick={() => setEditingMessage(null)}>取消</button>
+                <button className="btn-primary" onClick={handleSaveEdit}>保存</button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* 底部多选操作栏 */}
+      {isSelectionMode && (
+        <div style={{
+          position: 'absolute',
+          bottom: 24,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          backgroundColor: 'var(--bg-secondary)', // Use system background
+          color: 'var(--text-primary)',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
+          borderRadius: '12px',
+          padding: '12px 24px',
+          display: 'flex',
+          gap: '20px',
+          zIndex: 1000,
+          alignItems: 'center',
+          border: '1px solid var(--border-color)', // Subtle border
+          backdropFilter: 'blur(10px)'
+        }}>
+          <span style={{ fontSize: '14px', fontWeight: 500 }}>已选 {selectedMessages.size} 条</span>
+          <div style={{ width: '1px', height: '16px', background: 'var(--border-color)' }}></div>
+          <button
+            className="btn-danger"
+            onClick={handleBatchDelete}
+            style={{
+              padding: '6px 16px',
+              borderRadius: '6px',
+              border: 'none',
+              backgroundColor: '#fa5151',
+              color: 'white',
+              cursor: 'pointer',
+              fontSize: '13px',
+              fontWeight: 500
+            }}
+          >
+            删除
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={() => {
+              setIsSelectionMode(false)
+              setSelectedMessages(new Set())
+            }}
+            style={{
+              padding: '6px 16px',
+              borderRadius: '6px',
+              border: '1px solid var(--border-color)',
+              backgroundColor: 'transparent',
+              color: 'var(--text-primary)',
+              cursor: 'pointer',
+              fontSize: '13px'
+            }}
+          >
+            取消
+          </button>
+        </div>
+      )}
     </div>
   )
+}
+
+// 全局语音播放管理器：同一时间只能播放一条语音
+const globalVoiceManager = {
+  currentAudio: null as HTMLAudioElement | null,
+  currentStopCallback: null as (() => void) | null,
+  play(audio: HTMLAudioElement, onStop: () => void) {
+    // 停止当前正在播放的语音
+    if (this.currentAudio && this.currentAudio !== audio) {
+      this.currentAudio.pause()
+      this.currentAudio.currentTime = 0
+      this.currentStopCallback?.()
+    }
+    this.currentAudio = audio
+    this.currentStopCallback = onStop
+  },
+  stop(audio: HTMLAudioElement) {
+    if (this.currentAudio === audio) {
+      this.currentAudio = null
+      this.currentStopCallback = null
+    }
+  },
 }
 
 // 前端表情包缓存
@@ -1332,24 +2575,44 @@ const senderAvatarCache = new Map<string, { avatarUrl?: string; displayName?: st
 const senderAvatarLoading = new Map<string, Promise<{ avatarUrl?: string; displayName?: string } | null>>()
 
 // 消息气泡组件
-function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, onRequireModelDownload }: {
+function MessageBubble({
+  message,
+  session,
+  showTime,
+  myAvatarUrl,
+  isGroupChat,
+  onRequireModelDownload,
+  onContextMenu,
+  isSelectionMode,
+  isSelected,
+  onToggleSelection
+}: {
   message: Message;
   session: ChatSession;
   showTime?: boolean;
   myAvatarUrl?: string;
   isGroupChat?: boolean;
   onRequireModelDownload?: (sessionId: string, messageId: string) => void;
+  onContextMenu?: (e: React.MouseEvent, message: Message) => void;
+  isSelectionMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelection?: (localId: number, isShiftKey?: boolean) => void;
 }) {
   const isSystem = isSystemMessage(message.localType)
   const isEmoji = message.localType === 47
   const isImage = message.localType === 3
   const isVideo = message.localType === 43
   const isVoice = message.localType === 34
+  const isCard = message.localType === 42
+  const isCall = message.localType === 50
+  const isType49 = message.localType === 49
   const isSent = message.isSend === 1
   const [senderAvatarUrl, setSenderAvatarUrl] = useState<string | undefined>(undefined)
   const [senderName, setSenderName] = useState<string | undefined>(undefined)
   const [emojiError, setEmojiError] = useState(false)
   const [emojiLoading, setEmojiLoading] = useState(false)
+
+  // State variables...
   const [imageError, setImageError] = useState(false)
   const [imageLoading, setImageLoading] = useState(false)
   const [imageHasUpdate, setImageHasUpdate] = useState(false)
@@ -1358,6 +2621,10 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
   const imageClickTimerRef = useRef<number | null>(null)
   const imageContainerRef = useRef<HTMLDivElement>(null)
   const imageAutoDecryptTriggered = useRef(false)
+  const imageAutoHdTriggered = useRef<string | null>(null)
+  const [imageInView, setImageInView] = useState(false)
+  const imageForceHdAttempted = useRef<string | null>(null)
+  const imageForceHdPending = useRef(false)
   const [voiceError, setVoiceError] = useState(false)
   const [voiceLoading, setVoiceLoading] = useState(false)
   const [isVoicePlaying, setIsVoicePlaying] = useState(false)
@@ -1365,17 +2632,20 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
   const [voiceTranscriptLoading, setVoiceTranscriptLoading] = useState(false)
   const [voiceTranscriptError, setVoiceTranscriptError] = useState(false)
   const voiceTranscriptRequestedRef = useRef(false)
-  const [showImagePreview, setShowImagePreview] = useState(false)
   const [autoTranscribeVoice, setAutoTranscribeVoice] = useState(true)
   const [voiceCurrentTime, setVoiceCurrentTime] = useState(0)
   const [voiceDuration, setVoiceDuration] = useState(0)
   const [voiceWaveform, setVoiceWaveform] = useState<number[]>([])
   const voiceAutoDecryptTriggered = useRef(false)
 
+  // 转账消息双方名称
+  const [transferPayerName, setTransferPayerName] = useState<string | undefined>(undefined)
+  const [transferReceiverName, setTransferReceiverName] = useState<string | undefined>(undefined)
+
   // 视频相关状态
   const [videoLoading, setVideoLoading] = useState(false)
   const [videoInfo, setVideoInfo] = useState<{ videoUrl?: string; coverUrl?: string; thumbUrl?: string; exists: boolean } | null>(null)
-  const videoContainerRef = useRef<HTMLDivElement>(null)
+  const videoContainerRef = useRef<HTMLElement>(null)
   const [isVideoVisible, setIsVideoVisible] = useState(false)
   const [videoMd5, setVideoMd5] = useState<string | null>(null)
 
@@ -1383,23 +2653,13 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
   useEffect(() => {
     if (!isVideo) return
 
-    console.log('[Video Debug] Full message object:', JSON.stringify(message, null, 2))
-    console.log('[Video Debug] Message keys:', Object.keys(message))
-    console.log('[Video Debug] Message:', {
-      localId: message.localId,
-      localType: message.localType,
-      hasVideoMd5: !!message.videoMd5,
-      hasContent: !!message.content,
-      hasParsedContent: !!message.parsedContent,
-      hasRawContent: !!(message as any).rawContent,
-      contentPreview: message.content?.substring(0, 200),
-      parsedContentPreview: message.parsedContent?.substring(0, 200),
-      rawContentPreview: (message as any).rawContent?.substring(0, 200)
-    })
+
+
+
 
     // 优先使用数据库中的 videoMd5
     if (message.videoMd5) {
-      console.log('[Video Debug] Using videoMd5 from message:', message.videoMd5)
+
       setVideoMd5(message.videoMd5)
       return
     }
@@ -1407,16 +2667,16 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
     // 尝试从多个可能的字段获取原始内容
     const contentToUse = message.content || (message as any).rawContent || message.parsedContent
     if (contentToUse) {
-      console.log('[Video Debug] Parsing MD5 from content, length:', contentToUse.length)
-      window.electronAPI.video.parseVideoMd5(contentToUse).then((result) => {
-        console.log('[Video Debug] Parse result:', result)
+
+      window.electronAPI.video.parseVideoMd5(contentToUse).then((result: { success: boolean; md5?: string; error?: string }) => {
+
         if (result && result.success && result.md5) {
-          console.log('[Video Debug] Parsed MD5:', result.md5)
+
           setVideoMd5(result.md5)
         } else {
           console.error('[Video Debug] Failed to parse MD5:', result)
         }
-      }).catch((err) => {
+      }).catch((err: unknown) => {
         console.error('[Video Debug] Parse error:', err)
       })
     }
@@ -1524,7 +2784,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
       }
       const pending = senderAvatarLoading.get(sender)
       if (pending) {
-        pending.then((result) => {
+        pending.then((result: { avatarUrl?: string; displayName?: string } | null) => {
           if (result) {
             setSenderAvatarUrl(result.avatarUrl)
             setSenderName(result.displayName)
@@ -1546,6 +2806,26 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
     }
   }, [isGroupChat, isSent, message.senderUsername, myAvatarUrl])
 
+  // 解析转账消息的付款方和收款方显示名称
+  useEffect(() => {
+    const payerWxid = (message as any).transferPayerUsername
+    const receiverWxid = (message as any).transferReceiverUsername
+    if (!payerWxid && !receiverWxid) return
+    // 仅对转账消息类型处理
+    if (message.localType !== 49 && message.localType !== 8589934592049) return
+
+    window.electronAPI.chat.resolveTransferDisplayNames(
+      session.username,
+      payerWxid || '',
+      receiverWxid || ''
+    ).then((result: { payerName: string; receiverName: string }) => {
+      if (result) {
+        setTransferPayerName(result.payerName)
+        setTransferReceiverName(result.receiverName)
+      }
+    }).catch(() => { })
+  }, [(message as any).transferPayerUsername, (message as any).transferReceiverUsername, session.username])
+
   // 自动下载表情包
   useEffect(() => {
     if (emojiLocalPath) return
@@ -1554,10 +2834,13 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
     }
   }, [isEmoji, message.emojiCdnUrl, emojiLocalPath, emojiLoading, emojiError])
 
-  const requestImageDecrypt = useCallback(async (forceUpdate = false) => {
-    if (!isImage || imageLoading) return
-    setImageLoading(true)
-    setImageError(false)
+  const requestImageDecrypt = useCallback(async (forceUpdate = false, silent = false) => {
+    if (!isImage) return
+    if (imageLoading) return
+    if (!silent) {
+      setImageLoading(true)
+      setImageError(false)
+    }
     try {
       if (message.imageMd5 || message.imageDatName) {
         const result = await window.electronAPI.image.decrypt({
@@ -1583,13 +2866,24 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
         setImageHasUpdate(false)
         return
       }
-      setImageError(true)
+      if (!silent) setImageError(true)
     } catch {
-      setImageError(true)
+      if (!silent) setImageError(true)
     } finally {
-      setImageLoading(false)
+      if (!silent) setImageLoading(false)
     }
   }, [isImage, imageLoading, message.imageMd5, message.imageDatName, message.localId, session.username, imageCacheKey, detectImageMimeFromBase64])
+
+  const triggerForceHd = useCallback(() => {
+    if (!message.imageMd5 && !message.imageDatName) return
+    if (imageForceHdAttempted.current === imageCacheKey) return
+    if (imageForceHdPending.current) return
+    imageForceHdAttempted.current = imageCacheKey
+    imageForceHdPending.current = true
+    requestImageDecrypt(true, true).finally(() => {
+      imageForceHdPending.current = false
+    })
+  }, [imageCacheKey, message.imageDatName, message.imageMd5, requestImageDecrypt])
 
   const handleImageClick = useCallback(() => {
     if (imageClickTimerRef.current) {
@@ -1626,7 +2920,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
       sessionId: session.username,
       imageMd5: message.imageMd5 || undefined,
       imageDatName: message.imageDatName
-    }).then((result) => {
+    }).then((result: { success: boolean; localPath?: string; hasUpdate?: boolean; error?: string }) => {
       if (cancelled) return
       if (result.success && result.localPath) {
         imageDataUrlCache.set(imageCacheKey, result.localPath)
@@ -1644,7 +2938,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
 
   useEffect(() => {
     if (!isImage) return
-    const unsubscribe = window.electronAPI.image.onUpdateAvailable((payload) => {
+    const unsubscribe = window.electronAPI.image.onUpdateAvailable((payload: { cacheKey: string; imageMd5?: string; imageDatName?: string }) => {
       const matchesCacheKey =
         payload.cacheKey === message.imageMd5 ||
         payload.cacheKey === message.imageDatName ||
@@ -1661,7 +2955,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
 
   useEffect(() => {
     if (!isImage) return
-    const unsubscribe = window.electronAPI.image.onCacheResolved((payload) => {
+    const unsubscribe = window.electronAPI.image.onCacheResolved((payload: { cacheKey: string; imageMd5?: string; imageDatName?: string; localPath: string }) => {
       const matchesCacheKey =
         payload.cacheKey === message.imageMd5 ||
         payload.cacheKey === message.imageDatName ||
@@ -1703,6 +2997,42 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
     return () => observer.disconnect()
   }, [isImage, imageLocalPath, message.imageMd5, message.imageDatName, requestImageDecrypt])
 
+  // 进入视野时自动尝试切换高清图
+  useEffect(() => {
+    if (!isImage) return
+    const container = imageContainerRef.current
+    if (!container) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0]
+        setImageInView(entry.isIntersecting)
+      },
+      { rootMargin: '120px', threshold: 0 }
+    )
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [isImage])
+
+  useEffect(() => {
+    if (!isImage || !imageHasUpdate || !imageInView) return
+    if (imageAutoHdTriggered.current === imageCacheKey) return
+    imageAutoHdTriggered.current = imageCacheKey
+    triggerForceHd()
+  }, [isImage, imageHasUpdate, imageInView, imageCacheKey, triggerForceHd])
+
+  useEffect(() => {
+    if (!isImage || !imageHasUpdate) return
+    if (imageAutoHdTriggered.current === imageCacheKey) return
+    imageAutoHdTriggered.current = imageCacheKey
+    triggerForceHd()
+  }, [isImage, imageHasUpdate, imageCacheKey, triggerForceHd])
+
+  // 更激进：进入视野/打开预览时，无论 hasUpdate 与否都尝试强制高清
+  useEffect(() => {
+    if (!isImage || !imageInView) return
+    triggerForceHd()
+  }, [isImage, imageInView, triggerForceHd])
+
 
   useEffect(() => {
     if (!isVoice) return
@@ -1716,6 +3046,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
     const handleEnded = () => {
       setIsVoicePlaying(false)
       setVoiceCurrentTime(0)
+      globalVoiceManager.stop(audio)
     }
     const handleTimeUpdate = () => {
       setVoiceCurrentTime(audio.currentTime)
@@ -1730,6 +3061,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
     audio.addEventListener('loadedmetadata', handleLoadedMetadata)
     return () => {
       audio.pause()
+      globalVoiceManager.stop(audio)
       audio.removeEventListener('play', handlePlay)
       audio.removeEventListener('pause', handlePause)
       audio.removeEventListener('ended', handleEnded)
@@ -1790,7 +3122,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
   useEffect(() => {
     if (!isVoice || voiceDataUrl) return
     window.electronAPI.chat.resolveVoiceCache(session.username, String(message.localId))
-      .then(result => {
+      .then((result: { success: boolean; hasCache: boolean; data?: string; error?: string }) => {
         if (result.success && result.hasCache && result.data) {
           const url = `data:audio/wav;base64,${result.data}`
           voiceDataUrlCache.set(voiceCacheKey, url)
@@ -1840,11 +3172,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
         String(message.localId),
         message.createTime
       )
-      console.log('[ChatPage] 调用转写:', {
-        sessionId: session.username,
-        msgId: message.localId,
-        createTime: message.createTime
-      })
+
       if (result.success) {
         const transcriptText = (result.transcript || '').trim()
         voiceTranscriptCache.set(voiceTranscriptCacheKey, transcriptText)
@@ -1890,6 +3218,9 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
   }, [isVoice, message.localId, requestVoiceTranscript])
 
   // 视频懒加载
+  const videoAutoLoadTriggered = useRef(false)
+  const [videoClicked, setVideoClicked] = useState(false)
+
   useEffect(() => {
     if (!isVideo || !videoContainerRef.current) return
 
@@ -1913,19 +3244,18 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
     return () => observer.disconnect()
   }, [isVideo])
 
-  // 加载视频信息
-  useEffect(() => {
-    if (!isVideo || !isVideoVisible || videoInfo || videoLoading) return
-    if (!videoMd5) {
-      console.log('[Video Debug] No videoMd5 available yet')
-      return
-    }
+  // 视频加载中状态引用，避免依赖问题
+  const videoLoadingRef = useRef(false)
 
-    console.log('[Video Debug] Loading video info for MD5:', videoMd5)
+  // 加载视频信息（添加重试机制）
+  const requestVideoInfo = useCallback(async () => {
+    if (!videoMd5 || videoLoadingRef.current) return
+
+    videoLoadingRef.current = true
     setVideoLoading(true)
-    window.electronAPI.video.getVideoInfo(videoMd5).then((result) => {
-      console.log('[Video Debug] getVideoInfo result:', result)
-      if (result && result.success) {
+    try {
+      const result = await window.electronAPI.video.getVideoInfo(videoMd5)
+      if (result && result.success && result.exists) {
         setVideoInfo({
           exists: result.exists,
           videoUrl: result.videoUrl,
@@ -1933,23 +3263,32 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
           thumbUrl: result.thumbUrl
         })
       } else {
-        console.error('[Video Debug] Video info failed:', result)
         setVideoInfo({ exists: false })
       }
-    }).catch((err) => {
-      console.error('[Video Debug] getVideoInfo error:', err)
+    } catch (err) {
       setVideoInfo({ exists: false })
-    }).finally(() => {
+    } finally {
+      videoLoadingRef.current = false
       setVideoLoading(false)
-    })
-  }, [isVideo, isVideoVisible, videoInfo, videoLoading, videoMd5])
+    }
+  }, [videoMd5])
+
+  // 视频进入视野时自动加载
+  useEffect(() => {
+    if (!isVideo || !isVideoVisible) return
+    if (videoInfo?.exists) return // 已成功加载，不需要重试
+    if (videoAutoLoadTriggered.current) return
+
+    videoAutoLoadTriggered.current = true
+    void requestVideoInfo()
+  }, [isVideo, isVideoVisible, videoInfo, requestVideoInfo])
 
 
   // 根据设置决定是否自动转写
   const [autoTranscribeEnabled, setAutoTranscribeEnabled] = useState(false)
 
   useEffect(() => {
-    window.electronAPI.config.get('autoTranscribeVoice').then((value) => {
+    window.electronAPI.config.get('autoTranscribeVoice').then((value: unknown) => {
       setAutoTranscribeEnabled(value === true)
     })
   }, [])
@@ -1964,9 +3303,39 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
     void requestVoiceTranscript()
   }, [autoTranscribeEnabled, isVoice, voiceDataUrl, voiceTranscript, voiceTranscriptError, voiceTranscriptLoading, requestVoiceTranscript])
 
+  // Selection mode handling removed from here to allow normal rendering
+  // We will wrap the output instead
+
+  // Regular rendering logic...
   if (isSystem) {
     return (
-      <div className="message-bubble system">
+      <div
+        className={`message-bubble system ${isSelectionMode ? 'selectable' : ''}`}
+        onContextMenu={(e) => onContextMenu?.(e, message)}
+        style={{ cursor: isSelectionMode ? 'pointer' : 'default', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+        onClick={(e) => {
+          if (isSelectionMode) {
+            e.stopPropagation()
+            onToggleSelection?.(message.localId, e.shiftKey)
+          }
+        }}
+      >
+        {isSelectionMode && (
+          <div className={`checkbox ${isSelected ? 'checked' : ''}`} style={{
+            width: '20px',
+            height: '20px',
+            borderRadius: '4px',
+            border: isSelected ? 'none' : '2px solid rgba(128,128,128,0.5)',
+            backgroundColor: isSelected ? 'var(--primary)' : 'transparent',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'white',
+            flexShrink: 0
+          }}>
+            {isSelected && <Check size={14} strokeWidth={3} />}
+          </div>
+        )}
         <div className="bubble-content">{message.parsedContent}</div>
       </div>
     )
@@ -2053,27 +3422,16 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
                   src={imageLocalPath}
                   alt="图片"
                   className="image-message"
-                  onClick={() => setShowImagePreview(true)}
+                  onClick={() => {
+                    if (imageHasUpdate) {
+                      void requestImageDecrypt(true, true)
+                    }
+                    void window.electronAPI.window.openImageViewerWindow(imageLocalPath)
+                  }}
                   onLoad={() => setImageError(false)}
                   onError={() => setImageError(true)}
                 />
-                {imageHasUpdate && (
-                  <button
-                    className="image-update-button"
-                    type="button"
-                    title="发现更高清图片，点击更新"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      void requestImageDecrypt(true)
-                    }}
-                  >
-                    <RefreshCw size={14} />
-                  </button>
-                )}
               </div>
-              {showImagePreview && (
-                <ImagePreview src={imageLocalPath} onClose={() => setShowImagePreview(false)} />
-              )}
             </>
           )}
         </div>
@@ -2094,7 +3452,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
       // 未进入可视区域时显示占位符
       if (!isVideoVisible) {
         return (
-          <div className="video-placeholder" ref={videoContainerRef}>
+          <div className="video-placeholder" ref={videoContainerRef as React.RefObject<HTMLDivElement>}>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polygon points="23 7 16 12 23 17 23 7"></polygon>
               <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
@@ -2106,29 +3464,40 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
       // 加载中
       if (videoLoading) {
         return (
-          <div className="video-loading" ref={videoContainerRef}>
+          <div className="video-loading" ref={videoContainerRef as React.RefObject<HTMLDivElement>}>
             <Loader2 size={20} className="spin" />
           </div>
         )
       }
 
-      // 视频不存在
+      // 视频不存在 - 添加点击重试功能
       if (!videoInfo?.exists || !videoInfo.videoUrl) {
         return (
-          <div className="video-unavailable" ref={videoContainerRef}>
+          <button
+            className={`video-unavailable ${videoClicked ? 'clicked' : ''}`}
+            ref={videoContainerRef as React.RefObject<HTMLButtonElement>}
+            onClick={() => {
+              setVideoClicked(true)
+              setTimeout(() => setVideoClicked(false), 800)
+              videoAutoLoadTriggered.current = false
+              void requestVideoInfo()
+            }}
+            type="button"
+          >
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polygon points="23 7 16 12 23 17 23 7"></polygon>
               <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
             </svg>
-            <span>视频不可用</span>
-          </div>
+            <span>视频未找到</span>
+            <span className="video-action">{videoClicked ? '已点击…' : '点击重试'}</span>
+          </button>
         )
       }
 
       // 默认显示缩略图，点击打开独立播放窗口
       const thumbSrc = videoInfo.thumbUrl || videoInfo.coverUrl
       return (
-        <div className="video-thumb-wrapper" ref={videoContainerRef} onClick={handlePlayVideo}>
+        <div className="video-thumb-wrapper" ref={videoContainerRef as React.RefObject<HTMLDivElement>} onClick={handlePlayVideo}>
           {thumbSrc ? (
             <img src={thumbSrc} alt="视频缩略图" className="video-thumb" />
           ) : (
@@ -2157,6 +3526,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
         if (isVoicePlaying) {
           audio.pause()
           audio.currentTime = 0
+          globalVoiceManager.stop(audio)
           return
         }
         if (!voiceDataUrl) {
@@ -2191,6 +3561,11 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
         }
         audio.src = source
         try {
+          // 停止其他正在播放的语音，确保同一时间只播放一条
+          globalVoiceManager.play(audio, () => {
+            audio.pause()
+            audio.currentTime = 0
+          })
           await audio.play()
         } catch {
           setVoiceError(true)
@@ -2307,6 +3682,293 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
       )
     }
 
+    // 名片消息
+    if (isCard) {
+      const cardName = message.cardNickname || message.cardUsername || '未知联系人'
+      return (
+        <div className="card-message">
+          <div className="card-icon">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+          </div>
+          <div className="card-info">
+            <div className="card-name">{cardName}</div>
+            <div className="card-label">个人名片</div>
+          </div>
+        </div>
+      )
+    }
+
+    // 通话消息
+    if (isCall) {
+      return (
+        <div className="call-message">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+          </svg>
+          <span>{message.parsedContent || '[通话]'}</span>
+        </div>
+      )
+    }
+
+    // 链接消息 (AppMessage)
+    const isAppMsg = message.rawContent?.includes('<appmsg') || (message.parsedContent && message.parsedContent.includes('<appmsg'))
+
+    if (isAppMsg) {
+      let title = '链接'
+      let desc = ''
+      let url = ''
+      let appMsgType = ''
+      let textAnnouncement = ''
+      let parsedDoc: Document | null = null
+
+      try {
+        const content = message.rawContent || message.parsedContent || ''
+        // 简单清理 XML 前缀（如 wxid:）
+        const xmlContent = content.substring(content.indexOf('<msg>'))
+
+        const parser = new DOMParser()
+        parsedDoc = parser.parseFromString(xmlContent, 'text/xml')
+
+        title = parsedDoc.querySelector('title')?.textContent || '链接'
+        desc = parsedDoc.querySelector('des')?.textContent || ''
+        url = parsedDoc.querySelector('url')?.textContent || ''
+        appMsgType = parsedDoc.querySelector('appmsg > type')?.textContent || parsedDoc.querySelector('type')?.textContent || ''
+        textAnnouncement = parsedDoc.querySelector('textannouncement')?.textContent || ''
+      } catch (e) {
+        console.error('解析 AppMsg 失败:', e)
+      }
+
+      // 群公告消息 (type=87)
+      if (appMsgType === '87') {
+        const announcementText = textAnnouncement || desc || '群公告'
+        return (
+          <div className="announcement-message">
+            <div className="announcement-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 17H2a3 3 0 0 0 3-3V9a7 7 0 0 1 14 0v5a3 3 0 0 0 3 3zm-8.27 4a2 2 0 0 1-3.46 0" />
+              </svg>
+            </div>
+            <div className="announcement-content">
+              <div className="announcement-label">群公告</div>
+              <div className="announcement-text">{announcementText}</div>
+            </div>
+          </div>
+        )
+      }
+
+      // 聊天记录 (type=19)
+      if (appMsgType === '19') {
+        const recordList = message.chatRecordList || []
+        const displayTitle = title || '群聊的聊天记录'
+        const metaText =
+          recordList.length > 0
+            ? `共 ${recordList.length} 条聊天记录`
+            : desc || '聊天记录'
+
+        const previewItems = recordList.slice(0, 4)
+
+        return (
+          <div
+            className="link-message chat-record-message"
+            onClick={(e) => {
+              e.stopPropagation()
+              // 打开聊天记录窗口
+              window.electronAPI.window.openChatHistoryWindow(session.username, message.localId)
+            }}
+            title="点击查看详细聊天记录"
+          >
+            <div className="link-header">
+              <div className="link-title" title={displayTitle}>
+                {displayTitle}
+              </div>
+            </div>
+            <div className="link-body">
+              <div className="chat-record-preview">
+                {previewItems.length > 0 ? (
+                  <>
+                    <div className="chat-record-meta-line" title={metaText}>
+                      {metaText}
+                    </div>
+                    <div className="chat-record-list">
+                      {previewItems.map((item, i) => (
+                        <div key={i} className="chat-record-item">
+                          <span className="source-name">
+                            {item.sourcename ? `${item.sourcename}: ` : ''}
+                          </span>
+                          {item.datadesc || item.datatitle || '[媒体消息]'}
+                        </div>
+                      ))}
+                      {recordList.length > previewItems.length && (
+                        <div className="chat-record-more">还有 {recordList.length - previewItems.length} 条…</div>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="chat-record-desc">
+                    {desc || '点击打开查看完整聊天记录'}
+                  </div>
+                )}
+              </div>
+              <div className="chat-record-icon">
+                <MessageSquare size={18} />
+              </div>
+            </div>
+          </div>
+        )
+      }
+
+      // 文件消息 (type=6)
+      if (appMsgType === '6') {
+        const fileName = message.fileName || title || '文件'
+        const fileSize = message.fileSize
+        const fileExt = message.fileExt || fileName.split('.').pop()?.toLowerCase() || ''
+
+        // 根据扩展名选择图标
+        const getFileIcon = () => {
+          const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2']
+          if (archiveExts.includes(fileExt)) {
+            return (
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            )
+          }
+          return (
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+              <polyline points="13 2 13 9 20 9" />
+            </svg>
+          )
+        }
+
+        return (
+          <div className="file-message">
+            <div className="file-icon">
+              {getFileIcon()}
+            </div>
+            <div className="file-info">
+              <div className="file-name" title={fileName}>{fileName}</div>
+              <div className="file-meta">
+                {fileSize ? formatFileSize(fileSize) : ''}
+              </div>
+            </div>
+          </div>
+        )
+      }
+
+      // 转账消息 (type=2000)
+      if (appMsgType === '2000') {
+        try {
+          // 使用外层已解析好的 parsedDoc（已去除 wxid 前缀）
+          const feedesc = parsedDoc?.querySelector('feedesc')?.textContent || ''
+          const payMemo = parsedDoc?.querySelector('pay_memo')?.textContent || ''
+          const paysubtype = parsedDoc?.querySelector('paysubtype')?.textContent || '1'
+
+          // paysubtype: 1=待收款, 3=已收款
+          const isReceived = paysubtype === '3'
+
+          // 如果 feedesc 为空，使用 title 作为降级
+          const displayAmount = feedesc || title || '微信转账'
+
+          // 构建转账描述：A 转账给 B
+          const transferDesc = transferPayerName && transferReceiverName
+            ? `${transferPayerName} 转账给 ${transferReceiverName}`
+            : undefined
+
+          return (
+            <div className={`transfer-message ${isReceived ? 'received' : ''}`}>
+              <div className="transfer-icon">
+                {isReceived ? (
+                  <svg width="32" height="32" viewBox="0 0 40 40" fill="none">
+                    <circle cx="20" cy="20" r="18" stroke="white" strokeWidth="2" />
+                    <path d="M12 20l6 6 10-12" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                ) : (
+                  <svg width="32" height="32" viewBox="0 0 40 40" fill="none">
+                    <circle cx="20" cy="20" r="18" stroke="white" strokeWidth="2" />
+                    <path d="M12 20h16M20 12l8 8-8 8" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </div>
+              <div className="transfer-info">
+                <div className="transfer-amount">{displayAmount}</div>
+                {transferDesc && <div className="transfer-desc">{transferDesc}</div>}
+                {payMemo && <div className="transfer-memo">{payMemo}</div>}
+                <div className="transfer-label">{isReceived ? '已收款' : '微信转账'}</div>
+              </div>
+            </div>
+          )
+        } catch (e) {
+          console.error('[Transfer Debug] Parse error:', e)
+          // 解析失败时的降级处理
+          const feedesc = title || '微信转账'
+          return (
+            <div className="transfer-message">
+              <div className="transfer-icon">
+                <svg width="32" height="32" viewBox="0 0 40 40" fill="none">
+                  <circle cx="20" cy="20" r="18" stroke="white" strokeWidth="2" />
+                  <path d="M12 20h16M20 12l8 8-8 8" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <div className="transfer-info">
+                <div className="transfer-amount">{feedesc}</div>
+                <div className="transfer-label">微信转账</div>
+              </div>
+            </div>
+          )
+        }
+      }
+
+      // 小程序 (type=33/36)
+      if (appMsgType === '33' || appMsgType === '36') {
+        return (
+          <div className="miniapp-message">
+            <div className="miniapp-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
+              </svg>
+            </div>
+            <div className="miniapp-info">
+              <div className="miniapp-title">{title}</div>
+              <div className="miniapp-label">小程序</div>
+            </div>
+          </div>
+        )
+      }
+
+      // 有 URL 的链接消息
+      if (url) {
+        return (
+          <div
+            className="link-message"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (window.electronAPI?.shell?.openExternal) {
+                window.electronAPI.shell.openExternal(url)
+              } else {
+                window.open(url, '_blank')
+              }
+            }}
+          >
+            <div className="link-header">
+              <div className="link-title" title={title}>{title}</div>
+            </div>
+            <div className="link-body">
+              <div className="link-desc" title={desc}>{desc}</div>
+              <div className="link-thumb-placeholder">
+                <Link size={24} />
+              </div>
+            </div>
+          </div>
+        )
+      }
+    }
+
     // 表情包消息
     if (isEmoji) {
       // ... (keep existing emoji logic)
@@ -2361,67 +4023,6 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
       )
     }
 
-    // 解析引用消息（Links / App Messages）
-    // localType: 21474836529 corresponds to AppMessage which often contains links
-    if (isLinkMessage) {
-      try {
-        // 清理内容：移除可能的 wxid 前缀，找到 XML 起始位置
-        let contentToParse = message.rawContent || message.parsedContent || '';
-        const xmlStartIndex = contentToParse.indexOf('<');
-        if (xmlStartIndex >= 0) {
-          contentToParse = contentToParse.substring(xmlStartIndex);
-        }
-
-        // 处理 HTML 转义字符
-        if (contentToParse.includes('&lt;')) {
-          contentToParse = contentToParse
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&amp;/g, '&')
-            .replace(/&quot;/g, '"')
-            .replace(/&apos;/g, "'");
-        }
-
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(contentToParse, "text/xml");
-        const appMsg = doc.querySelector('appmsg');
-
-        if (appMsg) {
-          const title = doc.querySelector('title')?.textContent || '未命名链接';
-          const des = doc.querySelector('des')?.textContent || '无描述';
-          const url = doc.querySelector('url')?.textContent || '';
-
-          return (
-            <div
-              className="link-message"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (url) {
-                  // 优先使用 electron 接口打开外部浏览器
-                  if (window.electronAPI?.shell?.openExternal) {
-                    window.electronAPI.shell.openExternal(url);
-                  } else {
-                    window.open(url, '_blank');
-                  }
-                }
-              }}
-            >
-              <div className="link-header">
-                <div className="link-content">
-                  <div className="link-title" title={title}>{title}</div>
-                  <div className="link-desc" title={des}>{des}</div>
-                </div>
-                <div className="link-icon">
-                  <Link size={24} />
-                </div>
-              </div>
-            </div>
-          );
-        }
-      } catch (e) {
-        console.error('Failed to parse app message', e);
-      }
-    }
     // 普通消息
     return <div className="bubble-content">{renderTextWithEmoji(cleanMessageContent(message.parsedContent))}</div>
   }
@@ -2433,27 +4034,81 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, o
           <span>{formatTime(message.createTime)}</span>
         </div>
       )}
-      <div className={`message-bubble ${bubbleClass} ${isEmoji && message.emojiCdnUrl && !emojiError ? 'emoji' : ''} ${isImage ? 'image' : ''} ${isVoice ? 'voice' : ''}`}>
-        <div className="bubble-avatar">
-          <Avatar
-            src={avatarUrl}
-            name={!isSent ? (isGroupChat ? (senderName || message.senderUsername || '?') : (session.displayName || session.username)) : '我'}
-            size={36}
-            className="bubble-avatar"
-          // If it's sent by me (isSent), we might not want 'group' class even if it's a group chat. 
-          // But 'group' class mainly handles default avatar icon.
-          // Let's rely on standard Avatar behavior.
-          />
+      <div
+        className={`message-wrapper-with-selection ${isSelectionMode ? 'selectable' : ''}`}
+        style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          width: '100%',
+          justifyContent: isSent ? 'flex-end' : 'flex-start',
+          cursor: isSelectionMode ? 'pointer' : 'default'
+        }}
+        onClick={(e) => {
+          if (isSelectionMode) {
+            e.stopPropagation()
+            onToggleSelection?.(message.localId, e.shiftKey)
+          }
+        }}
+      >
+        {isSelectionMode && !isSent && (
+          <div className={`checkbox ${isSelected ? 'checked' : ''}`} style={{
+            width: '20px',
+            height: '20px',
+            borderRadius: '4px',
+            border: isSelected ? 'none' : '2px solid rgba(128,128,128,0.5)',
+            backgroundColor: isSelected ? 'var(--primary)' : 'transparent',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'white',
+            marginRight: '12px',
+            marginTop: '10px', // Align with avatar top
+            flexShrink: 0
+          }}>
+            {isSelected && <Check size={14} strokeWidth={3} />}
+          </div>
+        )}
+
+        <div className={`message-bubble ${bubbleClass} ${isEmoji && message.emojiCdnUrl && !emojiError ? 'emoji' : ''} ${isImage ? 'image' : ''} ${isVoice ? 'voice' : ''}`}
+          onContextMenu={(e) => onContextMenu?.(e, message)}
+        >
+          <div className="bubble-avatar">
+            <Avatar
+              src={avatarUrl}
+              name={!isSent ? (isGroupChat ? (senderName || message.senderUsername || '?') : (session.displayName || session.username)) : '我'}
+              size={36}
+              className="bubble-avatar"
+            />
+          </div>
+          <div className="bubble-body">
+            {/* 群聊中显示发送者名称 */}
+            {isGroupChat && !isSent && (
+              <div className="sender-name">
+                {senderName || message.senderUsername || '群成员'}
+              </div>
+            )}
+            {renderContent()}
+          </div>
         </div>
-        <div className="bubble-body">
-          {/* 群聊中显示发送者名称 */}
-          {isGroupChat && !isSent && (
-            <div className="sender-name">
-              {senderName || message.senderUsername || '群成员'}
-            </div>
-          )}
-          {renderContent()}
-        </div>
+
+        {isSelectionMode && isSent && (
+          <div className={`checkbox ${isSelected ? 'checked' : ''}`} style={{
+            width: '20px',
+            height: '20px',
+            borderRadius: '4px',
+            border: isSelected ? 'none' : '2px solid rgba(128,128,128,0.5)',
+            backgroundColor: isSelected ? 'var(--primary)' : 'transparent',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'white',
+            marginLeft: '12px',
+            marginTop: '10px',
+            flexShrink: 0
+          }}>
+            {isSelected && <Check size={14} strokeWidth={3} />}
+          </div>
+        )}
       </div>
     </>
   )

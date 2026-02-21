@@ -1,4 +1,4 @@
-import type { ChatSession, Message, Contact } from './models'
+import type { ChatSession, Message, Contact, ContactInfo } from './models'
 
 export interface ElectronAPI {
   window: {
@@ -11,6 +11,8 @@ export interface ElectronAPI {
     setTitleBarOverlay: (options: { symbolColor: string }) => void
     openVideoPlayerWindow: (videoPath: string, videoWidth?: number, videoHeight?: number) => Promise<void>
     resizeToFitVideo: (videoWidth: number, videoHeight: number) => Promise<void>
+    openImageViewerWindow: (imagePath: string) => Promise<void>
+    openChatHistoryWindow: (sessionId: string, messageId: number) => Promise<boolean>
   }
   config: {
     get: (key: string) => Promise<unknown>
@@ -31,6 +33,7 @@ export interface ElectronAPI {
     getVersion: () => Promise<string>
     checkForUpdates: () => Promise<{ hasUpdate: boolean; version?: string; releaseNotes?: string }>
     downloadAndInstall: () => Promise<void>
+    ignoreUpdate: (version: string) => Promise<{ success: boolean }>
     onDownloadProgress: (callback: (progress: number) => void) => () => void
     onUpdateAvailable: (callback: (info: { version: string; releaseNotes: string }) => void) => () => void
   }
@@ -41,6 +44,7 @@ export interface ElectronAPI {
   dbPath: {
     autoDetect: () => Promise<{ success: boolean; path?: string; error?: string }>
     scanWxids: (rootPath: string) => Promise<WxidInfo[]>
+    scanWxidCandidates: (rootPath: string) => Promise<WxidInfo[]>
     getDefault: () => Promise<string>
   }
   wcdb: {
@@ -63,7 +67,7 @@ export interface ElectronAPI {
       contacts?: Record<string, { displayName?: string; avatarUrl?: string }>
       error?: string
     }>
-    getMessages: (sessionId: string, offset?: number, limit?: number) => Promise<{
+    getMessages: (sessionId: string, offset?: number, limit?: number, startTime?: number, endTime?: number, ascending?: boolean) => Promise<{
       success: boolean;
       messages?: Message[];
       hasMore?: boolean;
@@ -74,8 +78,21 @@ export interface ElectronAPI {
       messages?: Message[]
       error?: string
     }>
+    getNewMessages: (sessionId: string, minTime: number, limit?: number) => Promise<{
+      success: boolean
+      messages?: Message[]
+      error?: string
+    }>
     getContact: (username: string) => Promise<Contact | null>
     getContactAvatar: (username: string) => Promise<{ avatarUrl?: string; displayName?: string } | null>
+    updateMessage: (sessionId: string, localId: number, createTime: number, newContent: string) => Promise<{ success: boolean; error?: string }>
+    deleteMessage: (sessionId: string, localId: number, createTime: number, dbPathHint?: string) => Promise<{ success: boolean; error?: string }>
+    resolveTransferDisplayNames: (chatroomId: string, payerUsername: string, receiverUsername: string) => Promise<{ payerName: string; receiverName: string }>
+    getContacts: () => Promise<{
+      success: boolean
+      contacts?: ContactInfo[]
+      error?: string
+    }>
     getMyAvatarUrl: () => Promise<{ success: boolean; avatarUrl?: string; error?: string }>
     downloadEmoji: (cdnUrl: string, md5?: string) => Promise<{ success: boolean; localPath?: string; error?: string }>
     close: () => Promise<boolean>
@@ -97,9 +114,13 @@ export interface ElectronAPI {
     }>
     getImageData: (sessionId: string, msgId: string) => Promise<{ success: boolean; data?: string; error?: string }>
     getVoiceData: (sessionId: string, msgId: string, createTime?: number, serverId?: string | number) => Promise<{ success: boolean; data?: string; error?: string }>
+    getAllVoiceMessages: (sessionId: string) => Promise<{ success: boolean; messages?: Message[]; error?: string }>
     resolveVoiceCache: (sessionId: string, msgId: string) => Promise<{ success: boolean; hasCache: boolean; data?: string }>
     getVoiceTranscript: (sessionId: string, msgId: string, createTime?: number) => Promise<{ success: boolean; transcript?: string; error?: string }>
     onVoiceTranscriptPartial: (callback: (payload: { msgId: string; text: string }) => void) => () => void
+    execQuery: (kind: string, path: string | null, sql: string) => Promise<{ success: boolean; rows?: any[]; error?: string }>
+    getMessage: (sessionId: string, localId: number) => Promise<{ success: boolean; message?: Message; error?: string }>
+    onWcdbChange: (callback: (event: any, data: { type: string; json: string }) => void) => () => void
   }
 
   image: {
@@ -144,12 +165,13 @@ export interface ElectronAPI {
       }
       error?: string
     }>
-    getContactRankings: (limit?: number) => Promise<{
+    getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number) => Promise<{
       success: boolean
       data?: Array<{
         username: string
         displayName: string
         avatarUrl?: string
+        wechatId?: string
         messageCount: number
         sentCount: number
         receivedCount: number
@@ -164,6 +186,26 @@ export interface ElectronAPI {
         weekdayDistribution: Record<number, number>
         monthlyDistribution: Record<string, number>
       }
+      error?: string
+    }>
+    getExcludedUsernames: () => Promise<{
+      success: boolean
+      data?: string[]
+      error?: string
+    }>
+    setExcludedUsernames: (usernames: string[]) => Promise<{
+      success: boolean
+      data?: string[]
+      error?: string
+    }>
+    getExcludeCandidates: () => Promise<{
+      success: boolean
+      data?: Array<{
+        username: string
+        displayName: string
+        avatarUrl?: string
+        wechatId?: string
+      }>
       error?: string
     }>
     onProgress: (callback: (payload: { status: string; progress: number }) => void) => () => void
@@ -190,6 +232,10 @@ export interface ElectronAPI {
         username: string
         displayName: string
         avatarUrl?: string
+        nickname?: string
+        alias?: string
+        remark?: string
+        groupNickname?: string
       }>
       error?: string
     }>
@@ -222,6 +268,22 @@ export interface ElectronAPI {
         }>
         total: number
       }
+      error?: string
+    }>
+    exportGroupMembers: (chatroomId: string, outputPath: string) => Promise<{
+      success: boolean
+      count?: number
+      error?: string
+    }>
+    exportGroupMemberMessages: (
+      chatroomId: string,
+      memberUsername: string,
+      outputPath: string,
+      startTime?: number,
+      endTime?: number
+    ) => Promise<{
+      success: boolean
+      count?: number
       error?: string
     }>
   }
@@ -303,7 +365,75 @@ export interface ElectronAPI {
     }>
     onProgress: (callback: (payload: { status: string; progress: number }) => void) => () => void
   }
+  dualReport: {
+    generateReport: (payload: { friendUsername: string; year: number }) => Promise<{
+      success: boolean
+      data?: {
+        year: number
+        selfName: string
+        selfAvatarUrl?: string
+        friendUsername: string
+        friendName: string
+        friendAvatarUrl?: string
+        firstChat: {
+          createTime: number
+          createTimeStr: string
+          content: string
+          isSentByMe: boolean
+          senderUsername?: string
+        } | null
+        firstChatMessages?: Array<{
+          content: string
+          isSentByMe: boolean
+          createTime: number
+          createTimeStr: string
+        }>
+        yearFirstChat?: {
+          createTime: number
+          createTimeStr: string
+          content: string
+          isSentByMe: boolean
+          friendName: string
+          firstThreeMessages: Array<{
+            content: string
+            isSentByMe: boolean
+            createTime: number
+            createTimeStr: string
+          }>
+        } | null
+        stats: {
+          totalMessages: number
+          totalWords: number
+          imageCount: number
+          voiceCount: number
+          emojiCount: number
+          myTopEmojiMd5?: string
+          friendTopEmojiMd5?: string
+          myTopEmojiUrl?: string
+          topPhrases: Array<{ phrase: string; count: number }>
+          myExclusivePhrases: Array<{ phrase: string; count: number }>
+          friendExclusivePhrases: Array<{ phrase: string; count: number }>
+          heatmap?: number[][]
+          initiative?: { initiated: number; received: number }
+          response?: { avg: number; fastest: number; count: number }
+          monthly?: Record<string, number>
+          streak?: { days: number; startDate: string; endDate: string }
+        }
+      }
+      error?: string
+    }>
+    onProgress: (callback: (payload: { status: string; progress: number }) => void) => () => void
+  }
   export: {
+    getExportStats: (sessionIds: string[], options: any) => Promise<{
+      totalMessages: number
+      voiceMessages: number
+      cachedVoiceCount: number
+      needTranscribeCount: number
+      mediaMessages: number
+      estimatedSeconds: number
+      sessions: Array<{ sessionId: string; displayName: string; totalCount: number; voiceCount: number }>
+    }>
     exportSessions: (sessionIds: string[], outputDir: string, options: ExportOptions) => Promise<{
       success: boolean
       successCount?: number
@@ -314,24 +444,111 @@ export interface ElectronAPI {
       success: boolean
       error?: string
     }>
+    exportContacts: (outputDir: string, options: { format: 'json' | 'csv' | 'vcf'; exportAvatars: boolean; contactTypes: { friends: boolean; groups: boolean; officials: boolean }; selectedUsernames?: string[] }) => Promise<{
+      success: boolean
+      successCount?: number
+      error?: string
+    }>
+    onProgress: (callback: (payload: ExportProgress) => void) => () => void
   }
   whisper: {
     downloadModel: () => Promise<{ success: boolean; modelPath?: string; tokensPath?: string; error?: string }>
     getModelStatus: () => Promise<{ success: boolean; exists?: boolean; modelPath?: string; tokensPath?: string; sizeBytes?: number; error?: string }>
     onDownloadProgress: (callback: (payload: { modelName: string; downloadedBytes: number; totalBytes?: number; percent?: number }) => void) => () => void
   }
+  sns: {
+    getTimeline: (limit: number, offset: number, usernames?: string[], keyword?: string, startTime?: number, endTime?: number) => Promise<{
+      success: boolean
+      timeline?: Array<{
+        id: string
+        username: string
+        nickname: string
+        avatarUrl?: string
+        createTime: number
+        contentDesc: string
+        type?: number
+        media: Array<{
+          url: string
+          thumb: string
+          md5?: string
+          token?: string
+          key?: string
+          encIdx?: string
+          livePhoto?: {
+            url: string
+            thumb: string
+            md5?: string
+            token?: string
+            key?: string
+            encIdx?: string
+          }
+        }>
+        likes: Array<string>
+        comments: Array<{ id: string; nickname: string; content: string; refCommentId: string; refNickname?: string }>
+        rawXml?: string
+      }>
+      error?: string
+    }>
+    debugResource: (url: string) => Promise<{ success: boolean; status?: number; headers?: any; error?: string }>
+    proxyImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    downloadImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; data?: any; contentType?: string; error?: string }>
+    exportTimeline: (options: {
+      outputDir: string
+      format: 'json' | 'html'
+      usernames?: string[]
+      keyword?: string
+      exportMedia?: boolean
+      startTime?: number
+      endTime?: number
+    }) => Promise<{ success: boolean; filePath?: string; postCount?: number; mediaCount?: number; error?: string }>
+    onExportProgress: (callback: (payload: { current: number; total: number; status: string }) => void) => () => void
+    selectExportDir: () => Promise<{ canceled: boolean; filePath?: string }>
+  }
+  llama: {
+    loadModel: (modelPath: string) => Promise<boolean>
+    createSession: (systemPrompt?: string) => Promise<boolean>
+    chat: (message: string) => Promise<{ success: boolean; response?: any; error?: string }>
+    downloadModel: (url: string, savePath: string) => Promise<void>
+    getModelsPath: () => Promise<string>
+    checkFileExists: (filePath: string) => Promise<boolean>
+    getModelStatus: (modelPath: string) => Promise<{ exists: boolean; path?: string; size?: number; error?: string }>
+    onToken: (callback: (token: string) => void) => () => void
+    onDownloadProgress: (callback: (payload: { downloaded: number; total: number; speed: number }) => void) => () => void
+  }
+  http: {
+    start: (port?: number) => Promise<{ success: boolean; port?: number; error?: string }>
+    stop: () => Promise<{ success: boolean }>
+    status: () => Promise<{ running: boolean; port: number; mediaExportPath: string }>
+  }
 }
 
 export interface ExportOptions {
-  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'html' | 'txt' | 'excel' | 'sql'
+  format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'html' | 'txt' | 'excel' | 'weclone' | 'sql'
   dateRange?: { start: number; end: number } | null
+  senderUsername?: string
+  fileNameSuffix?: string
   exportMedia?: boolean
   exportAvatars?: boolean
   exportImages?: boolean
   exportVoices?: boolean
+  exportVideos?: boolean
   exportEmojis?: boolean
   exportVoiceAsText?: boolean
   excelCompactColumns?: boolean
+  txtColumns?: string[]
+  sessionLayout?: 'shared' | 'per-session'
+  displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
+  exportConcurrency?: number
+}
+
+export interface ExportProgress {
+  current: number
+  total: number
+  currentSession: string
+  phase: 'preparing' | 'exporting' | 'exporting-media' | 'exporting-voice' | 'writing' | 'complete'
+  phaseProgress?: number
+  phaseTotal?: number
+  phaseLabel?: string
 }
 
 export interface WxidInfo {

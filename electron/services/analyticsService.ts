@@ -3,6 +3,7 @@ import { wcdbService } from './wcdbService'
 import { join } from 'path'
 import { readFile, writeFile, rm } from 'fs/promises'
 import { app } from 'electron'
+import { createHash } from 'crypto'
 
 export interface ChatStatistics {
   totalMessages: number
@@ -30,6 +31,7 @@ export interface ContactRanking {
   username: string
   displayName: string
   avatarUrl?: string
+  wechatId?: string
   messageCount: number
   sentCount: number
   receivedCount: number
@@ -46,6 +48,58 @@ class AnalyticsService {
     this.configService = new ConfigService()
   }
 
+  private normalizeUsername(username: string): string {
+    return username.trim().toLowerCase()
+  }
+
+  private normalizeExcludedUsernames(value: unknown): string[] {
+    if (!Array.isArray(value)) return []
+    const normalized = value
+      .map((item) => typeof item === 'string' ? item.trim().toLowerCase() : '')
+      .filter((item) => item.length > 0)
+    return Array.from(new Set(normalized))
+  }
+
+  private getExcludedUsernamesList(): string[] {
+    return this.normalizeExcludedUsernames(this.configService.get('analyticsExcludedUsernames'))
+  }
+
+  private getExcludedUsernamesSet(): Set<string> {
+    return new Set(this.getExcludedUsernamesList())
+  }
+
+  private escapeSqlValue(value: string): string {
+    return value.replace(/'/g, "''")
+  }
+
+  private async getAliasMap(usernames: string[]): Promise<Record<string, string>> {
+    const map: Record<string, string> = {}
+    if (usernames.length === 0) return map
+
+    const chunkSize = 200
+    for (let i = 0; i < usernames.length; i += chunkSize) {
+      const chunk = usernames.slice(i, i + chunkSize)
+      const inList = chunk.map((u) => `'${this.escapeSqlValue(u)}'`).join(',')
+      if (!inList) continue
+      const sql = `
+        SELECT username, alias
+        FROM contact
+        WHERE username IN (${inList})
+      `
+      const result = await wcdbService.execQuery('contact', null, sql)
+      if (!result.success || !result.rows) continue
+      for (const row of result.rows as Record<string, any>[]) {
+        const username = row.username || ''
+        const alias = row.alias || ''
+        if (username && alias) {
+          map[username] = alias
+        }
+      }
+    }
+
+    return map
+  }
+
   private cleanAccountDirName(name: string): string {
     const trimmed = name.trim()
     if (!trimmed) return trimmed
@@ -54,7 +108,11 @@ class AnalyticsService {
       if (match) return match[1]
       return trimmed
     }
-    return trimmed
+
+    const suffixMatch = trimmed.match(/^(.+)_([a-zA-Z0-9]{4})$/)
+    const cleaned = suffixMatch ? suffixMatch[1] : trimmed
+    
+    return cleaned
   }
 
   private isPrivateSession(username: string, cleanedWxid: string): boolean {
@@ -97,13 +155,15 @@ class AnalyticsService {
   }
 
   private async getPrivateSessions(
-    cleanedWxid: string
+    cleanedWxid: string,
+    excludedUsernames?: Set<string>
   ): Promise<{ usernames: string[]; numericIds: string[] }> {
     const sessionResult = await wcdbService.getSessions()
     if (!sessionResult.success || !sessionResult.sessions) {
       return { usernames: [], numericIds: [] }
     }
     const rows = sessionResult.sessions as Record<string, any>[]
+    const excluded = excludedUsernames ?? this.getExcludedUsernamesSet()
 
     const sample = rows[0]
     void sample
@@ -124,7 +184,11 @@ class AnalyticsService {
       return { username, idValue }
     })
     const usernames = sessions.map((s) => s.username)
-    const privateSessions = sessions.filter((s) => this.isPrivateSession(s.username, cleanedWxid))
+    const privateSessions = sessions.filter((s) => {
+      if (!this.isPrivateSession(s.username, cleanedWxid)) return false
+      if (excluded.size === 0) return true
+      return !excluded.has(this.normalizeUsername(s.username))
+    })
     const privateUsernames = privateSessions.map((s) => s.username)
     const numericIds = privateSessions
       .map((s) => s.idValue)
@@ -177,11 +241,18 @@ class AnalyticsService {
   }
 
   private buildAggregateCacheKey(sessionIds: string[], beginTimestamp: number, endTimestamp: number): string {
-    const sample = sessionIds.slice(0, 5).join(',')
-    return `${beginTimestamp}-${endTimestamp}-${sessionIds.length}-${sample}`
+    if (sessionIds.length === 0) {
+      return `${beginTimestamp}-${endTimestamp}-0-empty`
+    }
+    const normalized = Array.from(new Set(sessionIds.map((id) => String(id)))).sort()
+    const hash = createHash('sha1').update(normalized.join('|')).digest('hex').slice(0, 12)
+    return `${beginTimestamp}-${endTimestamp}-${normalized.length}-${hash}`
   }
 
   private async computeAggregateByCursor(sessionIds: string[], beginTimestamp = 0, endTimestamp = 0): Promise<any> {
+    const wxid = this.configService.get('myWxid')
+    const cleanedWxid = wxid ? this.cleanAccountDirName(wxid) : ''
+
     const aggregate = {
       total: 0,
       sent: 0,
@@ -206,8 +277,22 @@ class AnalyticsService {
         if (endTimestamp > 0 && createTime > endTimestamp) return
 
         const localType = parseInt(row.local_type || row.type || '1', 10)
-        const isSendRaw = row.computed_is_send ?? row.is_send ?? row.isSend ?? 0
-        const isSend = String(isSendRaw) === '1' || isSendRaw === 1 || isSendRaw === true
+        const isSendRaw = row.computed_is_send ?? row.is_send ?? row.isSend
+        let isSend = String(isSendRaw) === '1' || isSendRaw === 1 || isSendRaw === true
+
+        // 如果底层没有提供 is_send，则根据发送者用户名推断
+        const senderUsername = row.sender_username || row.senderUsername || row.sender
+        if (isSendRaw === undefined || isSendRaw === null) {
+          if (senderUsername && (cleanedWxid)) {
+            const senderLower = String(senderUsername).toLowerCase()
+            const myWxidLower = cleanedWxid.toLowerCase()
+            isSend = (
+              senderLower === myWxidLower ||
+              // 兼容非 wxid 开头的账号（如果文件夹名带后缀，如 custom_backup，而 sender 是 custom）
+              (myWxidLower.startsWith(senderLower + '_'))
+            )
+          }
+        }
 
         aggregate.total += 1
         sessionStat.total += 1
@@ -369,6 +454,65 @@ class AnalyticsService {
     void results
   }
 
+  async getExcludedUsernames(): Promise<{ success: boolean; data?: string[]; error?: string }> {
+    try {
+      return { success: true, data: this.getExcludedUsernamesList() }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async setExcludedUsernames(usernames: string[]): Promise<{ success: boolean; data?: string[]; error?: string }> {
+    try {
+      const normalized = this.normalizeExcludedUsernames(usernames)
+      this.configService.set('analyticsExcludedUsernames', normalized)
+      await this.clearCache()
+      return { success: true, data: normalized }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async getExcludeCandidates(): Promise<{ success: boolean; data?: Array<{ username: string; displayName: string; avatarUrl?: string; wechatId?: string }>; error?: string }> {
+    try {
+      const conn = await this.ensureConnected()
+      if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
+
+      const excluded = this.getExcludedUsernamesSet()
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid, new Set())
+
+      const usernames = new Set<string>(sessionInfo.usernames)
+      for (const name of excluded) usernames.add(name)
+
+      if (usernames.size === 0) {
+        return { success: true, data: [] }
+      }
+
+      const usernameList = Array.from(usernames)
+      const [displayNames, avatarUrls, aliasMap] = await Promise.all([
+        wcdbService.getDisplayNames(usernameList),
+        wcdbService.getAvatarUrls(usernameList),
+        this.getAliasMap(usernameList)
+      ])
+
+      const entries = usernameList.map((username) => {
+        const displayName = displayNames.success && displayNames.map
+          ? (displayNames.map[username] || username)
+          : username
+        const avatarUrl = avatarUrls.success && avatarUrls.map
+          ? avatarUrls.map[username]
+          : undefined
+        const alias = aliasMap[username]
+        const wechatId = alias || (!username.startsWith('wxid_') ? username : '')
+        return { username, displayName, avatarUrl, wechatId }
+      })
+
+      return { success: true, data: entries }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
   async getOverallStatistics(force = false): Promise<{ success: boolean; data?: ChatStatistics; error?: string }> {
     try {
       const conn = await this.ensureConnected()
@@ -433,7 +577,11 @@ class AnalyticsService {
     }
   }
 
-  async getContactRankings(limit: number = 20): Promise<{ success: boolean; data?: ContactRanking[]; error?: string }> {
+  async getContactRankings(
+    limit: number = 20,
+    beginTimestamp: number = 0,
+    endTimestamp: number = 0
+  ): Promise<{ success: boolean; data?: ContactRanking[]; error?: string }> {
     try {
       const conn = await this.ensureConnected()
       if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
@@ -443,7 +591,7 @@ class AnalyticsService {
         return { success: false, error: '未找到消息会话' }
       }
 
-      const result = await this.getAggregateWithFallback(sessionInfo.usernames, 0, 0)
+      const result = await this.getAggregateWithFallback(sessionInfo.usernames, beginTimestamp, endTimestamp)
       if (!result.success || !result.data) {
         return { success: false, error: result.error || '聚合统计失败' }
       }
@@ -451,9 +599,10 @@ class AnalyticsService {
       const d = result.data
       const sessions = this.normalizeAggregateSessions(d.sessions, d.idMap)
       const usernames = Object.keys(sessions)
-      const [displayNames, avatarUrls] = await Promise.all([
+      const [displayNames, avatarUrls, aliasMap] = await Promise.all([
         wcdbService.getDisplayNames(usernames),
-        wcdbService.getAvatarUrls(usernames)
+        wcdbService.getAvatarUrls(usernames),
+        this.getAliasMap(usernames)
       ])
 
       const rankings: ContactRanking[] = usernames
@@ -465,10 +614,13 @@ class AnalyticsService {
           const avatarUrl = avatarUrls.success && avatarUrls.map
             ? avatarUrls.map[username]
             : undefined
+          const alias = aliasMap[username] || ''
+          const wechatId = alias || (!username.startsWith('wxid_') ? username : '')
           return {
             username,
             displayName,
             avatarUrl,
+            wechatId,
             messageCount: stat.total,
             sentCount: stat.sent,
             receivedCount: stat.received,
