@@ -1,5 +1,10 @@
 ﻿import { contextBridge, ipcRenderer } from 'electron'
 
+type CloseConfirmPayload = {
+  canMinimizeToTray: boolean
+  restoreMethod?: 'tray' | 'dock'
+}
+
 // 暴露给渲染进程的 API
 contextBridge.exposeInMainWorld('electronAPI', {
   // 配置
@@ -106,8 +111,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('window:maximizeStateChanged', listener)
     },
     close: () => ipcRenderer.send('window:close'),
-    onCloseConfirmRequested: (callback: (payload: { canMinimizeToTray: boolean }) => void) => {
-      const listener = (_: unknown, payload: { canMinimizeToTray: boolean }) => callback(payload)
+    onCloseConfirmRequested: (callback: (payload: CloseConfirmPayload) => void) => {
+      const listener = (_: unknown, payload: CloseConfirmPayload) => callback(payload)
       ipcRenderer.on('window:confirmCloseRequested', listener)
       return () => ipcRenderer.removeListener('window:confirmCloseRequested', listener)
     },
@@ -588,6 +593,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       displayName?: string
       avatarUrl?: string
     }) => ipcRenderer.invoke('insight:triggerSessionInsight', payload),
+    listProfileStatuses: (sessionIds: string[]) => ipcRenderer.invoke('insight:listProfileStatuses', sessionIds),
+    generateProfile: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+    }) => ipcRenderer.invoke('insight:generateProfile', payload),
+    cancelProfile: (sessionId?: string) => ipcRenderer.invoke('insight:cancelProfile', sessionId),
     generateFootprintInsight: (payload: {
       rangeLabel: string
       summary: {
@@ -613,6 +625,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
       contextCount?: number
       forceRefresh?: boolean
     }) => ipcRenderer.invoke('insight:generateMessageInsight', payload)
+  },
+
+  groupSummary: {
+    listRecords: (filters?: any) => ipcRenderer.invoke('groupSummary:listRecords', filters),
+    getRecord: (id: string) => ipcRenderer.invoke('groupSummary:getRecord', id),
+    triggerManual: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+      startTime: number
+      endTime: number
+    }) => ipcRenderer.invoke('groupSummary:triggerManual', payload),
+    triggerDay: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+      date: string
+    }) => ipcRenderer.invoke('groupSummary:triggerDay', payload)
   },
 
   social: {
