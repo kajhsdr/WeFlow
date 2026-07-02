@@ -1,6 +1,6 @@
-import React, { memo, useRef, useCallback } from 'react'
+import React, { memo, useRef, useCallback, useEffect, useState } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
-import { Search, Hash, Clock, MoreVertical, X, CheckSquare, Square } from 'lucide-react'
+import { Search, X, CheckSquare, Square, RefreshCw } from 'lucide-react'
 import type { SessionRow, ConversationTab, ContactsSortConfig } from '../../types'
 import type { SessionContentMetric } from '../../hooks/useSessionMetrics'
 import { conversationTabLabels, exportKindPriority } from '../../constants'
@@ -24,6 +24,9 @@ interface SessionTableProps {
   isLoading?: boolean
   metricsMap?: Record<string, SessionContentMetric>
   loadingRefs?: Set<string>
+  metricsLoadingCount?: number
+  onRefreshStats?: () => void
+  isRefreshingStats?: boolean
 }
 
 const SessionTable: React.FC<SessionTableProps> = ({
@@ -41,9 +44,32 @@ const SessionTable: React.FC<SessionTableProps> = ({
   onAutomationExport,
   isLoading,
   metricsMap,
-  loadingRefs
+  loadingRefs,
+  metricsLoadingCount = 0,
+  onRefreshStats,
+  isRefreshingStats = false
 }) => {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const [isStatsNoticeMounted, setIsStatsNoticeMounted] = useState(false)
+  const [isStatsNoticeLeaving, setIsStatsNoticeLeaving] = useState(false)
+  const isMetricsScanning = metricsLoadingCount > 0
+
+  useEffect(() => {
+    if (isMetricsScanning) {
+      setIsStatsNoticeMounted(true)
+      setIsStatsNoticeLeaving(false)
+      return
+    }
+
+    if (!isStatsNoticeMounted) return
+    setIsStatsNoticeLeaving(true)
+    const timer = window.setTimeout(() => {
+      setIsStatsNoticeMounted(false)
+      setIsStatsNoticeLeaving(false)
+    }, 260)
+
+    return () => window.clearTimeout(timer)
+  }, [isMetricsScanning, isStatsNoticeMounted])
 
   const handleSearchClear = () => onSearchChange('')
 
@@ -126,6 +152,19 @@ const SessionTable: React.FC<SessionTableProps> = ({
             </button>
           )}
         </div>
+
+        {onRefreshStats && (
+          <button
+            type="button"
+            className={`st-refresh-stats-btn ${isRefreshingStats ? 'refreshing' : ''}`}
+            onClick={onRefreshStats}
+            disabled={isRefreshingStats || isLoading || sessions.length === 0}
+            title="重建导出统计缓存"
+            aria-label="重建导出统计缓存"
+          >
+            <RefreshCw size={16} />
+          </button>
+        )}
       </div>
 
       {/* ─── Table Columns Header ─────────────────────────────────────── */}
@@ -287,6 +326,17 @@ const SessionTable: React.FC<SessionTableProps> = ({
               )
             }}
           />
+        )}
+
+        {isStatsNoticeMounted && (
+          <div
+            className={`st-metrics-status ${isStatsNoticeLeaving ? 'leaving' : ''}`}
+            aria-live="polite"
+          >
+            <span className="st-metrics-status-dot" />
+            <span>正在统计会话消息，已完成的结果会逐行更新</span>
+            <span className="st-metrics-status-count">{metricsLoadingCount.toLocaleString()} 项</span>
+          </div>
         )}
       </div>
     </div>

@@ -103,6 +103,11 @@ function ExportPage() {
     }
   }, [displayedSessions, fetchMetrics])
 
+  const handleRefreshStats = useCallback(() => {
+    if (sessions.length === 0 || loadingRefs.size > 0) return
+    void fetchMetrics(sessions.map(s => s.username), { forceRefresh: true })
+  }, [fetchMetrics, loadingRefs.size, sessions])
+
   // ── 4. Manage Tasks ──
   const {
     tasks: exportTasks,
@@ -287,6 +292,9 @@ function ExportPage() {
             onSortChange={setSortConfig}
             metricsMap={metricsMap}
             loadingRefs={loadingRefs}
+            metricsLoadingCount={loadingRefs.size}
+            onRefreshStats={handleRefreshStats}
+            isRefreshingStats={loadingRefs.size > 0}
             onSingleExport={handleSingleExport}
             onBatchExport={handleExportSelected}
             onAutomationExport={handleAutomationExportFromSelection}

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs'
 import { ConfigService } from './config'
 
 /** 缓存版本号。增加/修改 SessionStatsCacheStats 字段后必须提升，避免旧缓存被误用。 */
-const CACHE_VERSION = 3
+const CACHE_VERSION = 4
 const MAX_SESSION_ENTRIES_PER_SCOPE = 2000
 const MAX_SCOPE_ENTRIES = 12
 

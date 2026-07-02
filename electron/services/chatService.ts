@@ -4773,6 +4773,7 @@ class ChatService {
     stats.imageMessages = Math.max(0, Math.floor(Number(data.image_messages || 0)))
     stats.videoMessages = Math.max(0, Math.floor(Number(data.video_messages || 0)))
     stats.emojiMessages = Math.max(0, Math.floor(Number(data.emoji_messages || 0)))
+    const hasNativeFileMessages = Object.prototype.hasOwnProperty.call(data, 'file_messages')
     stats.fileMessages = Math.max(0, Math.floor(Number(data.file_messages || 0)))
     stats.callMessages = Math.max(0, Math.floor(Number(data.call_messages || 0)))
     stats.transferMessages = Math.max(0, Math.floor(Number(data.transfer_messages || 0)))
@@ -4794,14 +4795,11 @@ class ChatService {
         // 保留 native 聚合结果作为兜底
       }
     } else {
-      // Native 聚合可能不识别 25769803825 等文件消息变体，返回 0 但 key 存在。
-      // 当 Native 返回的文件消息数为 0 时，通过轻量 cursor 扫描补充，避免漏统计。
-      // 仅在 0 时兜底是为了兼顾性能：若 Native 已给出非 0 结果，通常已覆盖常见文件消息。
-      const nativeFileMessages = Math.max(0, Math.floor(Number(data.file_messages || 0)))
-      if (nativeFileMessages === 0) {
+      // 新版 native 聚合会返回 file_messages；仅兼容旧 DLL 缺少该字段时再走 cursor 兜底。
+      if (!hasNativeFileMessages) {
         try {
           const cursorFileMessages = await this.collectFileMessageCountByCursorScan(sessionId, beginTimestamp, endTimestamp)
-          stats.fileMessages = Math.max(nativeFileMessages, cursorFileMessages)
+          stats.fileMessages = Math.max(stats.fileMessages, cursorFileMessages)
         } catch {
           // 保留 native 聚合结果作为兜底
         }
@@ -5082,6 +5080,7 @@ class ChatService {
     }
 
     const nativeBatchStats: Record<string, ExportSessionStats> = {}
+    const nativeBatchHasFileMessages: Record<string, boolean> = {}
     let hasNativeBatchStats = false
     if (!preferAccurateSpecialTypes) {
       try {
@@ -5096,6 +5095,7 @@ class ChatService {
           for (const sessionId of normalizedSessionIds) {
             const row = nativeBatch.data?.[sessionId] as Record<string, any> | undefined
             if (!row || typeof row !== 'object') continue
+            nativeBatchHasFileMessages[sessionId] = Object.prototype.hasOwnProperty.call(row, 'file_messages')
             nativeBatchStats[sessionId] = this.toExportSessionStatsFromNativeTypeRow(sessionId, row, {
               updateGroupHint: beginTimestamp <= 0 && endTimestamp <= 0
             })
@@ -5121,9 +5121,8 @@ class ChatService {
             beginTimestamp,
             endTimestamp
           )
-        // Native 批量统计可能不识别文件消息变体（如 25769803825），对 fileMessages 为 0 的会话补充 cursor 扫描。
-        // 导出页同时加载多个会话时走批量路径，这里需要与单会话路径保持一致的兜底策略。
-        if (fromNativeBatch && stats.fileMessages === 0) {
+        // 新版 native 批量统计会返回 file_messages；仅兼容旧 DLL 缺少该字段时再走 cursor 兜底。
+        if (fromNativeBatch && !nativeBatchHasFileMessages[sessionId]) {
           try {
             const cursorFileMessages = await this.collectFileMessageCountByCursorScan(sessionId, beginTimestamp, endTimestamp)
             stats.fileMessages = Math.max(stats.fileMessages, cursorFileMessages)

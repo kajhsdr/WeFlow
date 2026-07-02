@@ -18,7 +18,7 @@ export interface SessionContentMetric {
   appMessages?: number
 }
 
-const METRICS_CHUNK_SIZE = 40
+const METRICS_CHUNK_SIZE = 160
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = []
@@ -33,7 +33,7 @@ interface SessionMetricsState {
   isLoading: boolean
   error: Error | null
   loadingRefs: Set<string>
-  fetchMetrics: (sessionIds: string[]) => Promise<void>
+  fetchMetrics: (sessionIds: string[], options?: { forceRefresh?: boolean }) => Promise<void>
 }
 
 export const useSessionMetrics = create<SessionMetricsState>((set, get) => ({
@@ -41,24 +41,44 @@ export const useSessionMetrics = create<SessionMetricsState>((set, get) => ({
   isLoading: false,
   error: null,
   loadingRefs: new Set(),
-  fetchMetrics: async (sessionIds: string[]) => {
+  fetchMetrics: async (sessionIds: string[], options?: { forceRefresh?: boolean }) => {
     if (sessionIds.length === 0) return
 
+    const forceRefresh = options?.forceRefresh === true
     const { metricsMap, loadingRefs } = get()
-    const missingIds = sessionIds.filter(id => !metricsMap[id] && !loadingRefs.has(id))
-    if (missingIds.length === 0) return
+    const normalizedIds = Array.from(new Set(sessionIds.map(id => String(id || '').trim()).filter(Boolean)))
+    const targetIds = forceRefresh
+      ? normalizedIds.filter(id => !loadingRefs.has(id))
+      : normalizedIds.filter(id => !metricsMap[id] && !loadingRefs.has(id))
+    if (targetIds.length === 0) return
 
     set({ isLoading: true, error: null })
 
     const newLoadingRefs = new Set(loadingRefs)
-    missingIds.forEach(id => newLoadingRefs.add(id))
-    set({ loadingRefs: newLoadingRefs })
+    targetIds.forEach(id => newLoadingRefs.add(id))
+    set(state => {
+      if (!forceRefresh) {
+        return { loadingRefs: newLoadingRefs }
+      }
+
+      const nextMetricsMap = { ...state.metricsMap }
+      targetIds.forEach(id => {
+        delete nextMetricsMap[id]
+      })
+      return {
+        loadingRefs: newLoadingRefs,
+        metricsMap: nextMetricsMap
+      }
+    })
 
     try {
       // 将会话分批顺序请求，每批返回后立即更新 UI，实现「扫出一个放一个」的渐进式效果。
-      const chunks = chunkArray(missingIds, METRICS_CHUNK_SIZE)
+      const chunks = chunkArray(targetIds, METRICS_CHUNK_SIZE)
       for (const chunk of chunks) {
-        const stats = await window.electronAPI.chat.getExportSessionStats(chunk, { includeRelations: false })
+        const stats = await window.electronAPI.chat.getExportSessionStats(chunk, {
+          includeRelations: false,
+          forceRefresh
+        })
 
         const newMetrics: Record<string, SessionContentMetric> = {}
         if (stats.success && stats.data) {
@@ -84,8 +104,8 @@ export const useSessionMetrics = create<SessionMetricsState>((set, get) => ({
     } finally {
       set(state => {
         const nextLoadingRefs = new Set(state.loadingRefs)
-        missingIds.forEach(id => nextLoadingRefs.delete(id))
-        return { loadingRefs: nextLoadingRefs, isLoading: false }
+        targetIds.forEach(id => nextLoadingRefs.delete(id))
+        return { loadingRefs: nextLoadingRefs, isLoading: nextLoadingRefs.size > 0 }
       })
     }
   }
