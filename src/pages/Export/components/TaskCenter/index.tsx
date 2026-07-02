@@ -17,7 +17,12 @@ interface TaskCenterProps {
   onPauseBackgroundTask: (taskId: string) => void
   onResumeBackgroundTask: (taskId: string) => void
   onCancelBackgroundTask: (taskId: string) => void
+  onClearCompletedBackgroundTasks: () => void
 }
+
+const isBackgroundTaskSettled = (task: BackgroundTaskRecord): boolean => (
+  task.status === 'completed' || task.status === 'failed' || task.status === 'canceled'
+)
 
 const parseBackgroundTaskProgress = (progressText?: string): { current: number; total: number; percent: number } | null => {
   const match = String(progressText || '').match(/(\d[\d,]*)\s*\/\s*(\d[\d,]*)/)
@@ -40,21 +45,28 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
   backgroundTasks,
   onPauseBackgroundTask,
   onResumeBackgroundTask,
-  onCancelBackgroundTask
+  onCancelBackgroundTask,
+  onClearCompletedBackgroundTasks
 }) => {
   const hasTasks = exportTasks.length > 0 || backgroundTasks.length > 0
   
   if (!hasTasks) return null
 
-  const activeExportTasks = exportTasks.filter(t => t.status === 'running' || t.status === 'cancel_requested')
   const completedExportTasks = exportTasks.filter(t => t.status === 'success' || t.status === 'error')
+  const completedBackgroundTasks = backgroundTasks.filter(isBackgroundTaskSettled)
+  const hasCompletedTasks = completedExportTasks.length > 0 || completedBackgroundTasks.length > 0
+
+  const handleClearCompletedTasks = () => {
+    onClearCompletedExportTasks()
+    onClearCompletedBackgroundTasks()
+  }
 
   return (
     <div className="task-center">
       <div className="task-center-header">
         <h2 className="title">任务中心</h2>
-        {completedExportTasks.length > 0 && (
-          <button className="clear-btn" onClick={onClearCompletedExportTasks}>
+        {hasCompletedTasks && (
+          <button className="clear-btn" onClick={handleClearCompletedTasks}>
             <Trash2 size={14} /> 清理已完成
           </button>
         )}
@@ -116,7 +128,7 @@ const TaskCenter: React.FC<TaskCenterProps> = ({
             {backgroundTasks.map(bgTask => {
               const isPausable = bgTask.status === 'running'
               const isResumable = bgTask.status === 'paused'
-              const isCancelable = bgTask.status !== 'completed' && bgTask.status !== 'canceled' && bgTask.status !== 'failed'
+              const isCancelable = !isBackgroundTaskSettled(bgTask)
               const progress = parseBackgroundTaskProgress(bgTask.progressText)
               const sourceLabel = backgroundTaskSourceLabels[bgTask.sourcePage] || '后台任务'
 

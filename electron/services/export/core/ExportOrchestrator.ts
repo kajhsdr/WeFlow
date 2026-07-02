@@ -38,6 +38,7 @@ import { ExcelFormatter } from '../formatters/ExcelFormatter';
 import { HtmlFormatter } from '../formatters/HtmlFormatter';
 import { JsonFormatter } from '../formatters/JsonFormatter';
 import { MarkdownFormatter } from '../formatters/MarkdownFormatter';
+import { SqlFormatter } from '../formatters/SqlFormatter';
 import { TxtFormatter } from '../formatters/TxtFormatter';
 import { WeCloneFormatter } from '../formatters/WeCloneFormatter';
 
@@ -98,6 +99,14 @@ export class ExportOrchestrator {
      */
     async exportSessionToMarkdown(sessionId: string, outputPath: string, options: ExportOptions, onProgress?: (progress: ExportProgress) => void, control?: ExportTaskControl): Promise<{ success: boolean; error?: string }> {
         const formatter = new MarkdownFormatter(this.context);
+        return formatter.export(sessionId, outputPath, options, onProgress, control);
+    }
+
+    /**
+     * 导出单个会话为 PostgreSQL SQL 脚本
+     */
+    async exportSessionToSql(sessionId: string, outputPath: string, options: ExportOptions, onProgress?: (progress: ExportProgress) => void, control?: ExportTaskControl): Promise<{ success: boolean; error?: string }> {
+        const formatter = new SqlFormatter(this.context);
         return formatter.export(sessionId, outputPath, options, onProgress, control);
     }
 
@@ -377,6 +386,7 @@ export class ExportOrchestrator {
               else if (effectiveOptions.format === 'markdown') ext = '.md'
               else if (effectiveOptions.format === 'weclone') ext = '.csv'
               else if (effectiveOptions.format === 'html') ext = '.html'
+              else if (effectiveOptions.format === 'sql') ext = '.sql'
               const preferredOutputPath = path.join(sessionDir, `${fileNameWithPrefix}${ext}`)
               const canTrySkipUnchanged = canTrySkipUnchangedTextSessions &&
                 typeof messageCountHint === 'number' &&
@@ -430,6 +440,8 @@ export class ExportOrchestrator {
                 result = await this.exportSessionToWeCloneCsv(sessionId, outputPath, effectiveOptions, sessionProgress, control)
               } else if (effectiveOptions.format === 'html') {
                 result = await this.exportSessionToHtml(sessionId, outputPath, effectiveOptions, sessionProgress, control)
+              } else if (effectiveOptions.format === 'sql') {
+                result = await this.exportSessionToSql(sessionId, outputPath, effectiveOptions, sessionProgress, control)
               } else {
                 result = { success: false, error: `不支持的格式: ${effectiveOptions.format}` }
               }

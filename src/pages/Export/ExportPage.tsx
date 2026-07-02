@@ -118,9 +118,14 @@ function ExportPage() {
     allTasks: backgroundTasks,
     pauseTask: pauseBgTask,
     resumeTask: resumeBgTask,
-    cancelTask: cancelBgTask
+    cancelTask: cancelBgTask,
+    clearSettledTasks: clearSettledBgTasks
   } = useBackgroundTasks()
   const taskCenterBackgroundTasks = backgroundTasks.filter(task => task.sourcePage === 'export' || task.sourcePage === 'chat')
+
+  const clearCompletedTaskCenterBackgroundTasks = useCallback(() => {
+    clearSettledBgTasks(task => task.sourcePage === 'export' || task.sourcePage === 'chat')
+  }, [clearSettledBgTasks])
 
   // ── 4. Dialog & Exports ──
   const { dialogState, openDialog, closeDialog } = useExportDialog()
@@ -297,6 +302,7 @@ function ExportPage() {
               onPauseBackgroundTask={pauseBgTask}
               onResumeBackgroundTask={resumeBgTask}
               onCancelBackgroundTask={cancelBgTask}
+              onClearCompletedBackgroundTasks={clearCompletedTaskCenterBackgroundTasks}
             />
           </section>
         )}

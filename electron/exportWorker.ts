@@ -320,6 +320,7 @@ async function runWeliveEngine() {
     if (format === 'markdown') return '.md'
     if (format === 'weclone') return '.csv'
     if (format === 'html') return '.html'
+    if (format === 'sql') return '.sql'
     return '.json'
   }
   const resolveFinalOutputPath = async (sessionId: string) => {
@@ -468,6 +469,9 @@ async function runWeliveEngine() {
       if (format === 'html') {
         return await exportService.orchestrator.exportSessionToHtml(sessionId, outputPath, options, queueProgress, taskControl)
       }
+      if (format === 'sql') {
+        return await exportService.orchestrator.exportSessionToSql(sessionId, outputPath, options, queueProgress, taskControl)
+      }
       return await exportService.orchestrator.exportSessionToChatLab(sessionId, outputPath, options, queueProgress, taskControl)
     }
 
@@ -533,13 +537,27 @@ async function runLegacyEngine() {
       config.options || {}
     )
   } else if (config.mode === 'single') {
-    result = await exportService.exportSessionToChatLab(
-      String(config.sessionId || '').trim(),
-      String(config.outputPath || '').trim(),
-      config.options || { format: 'chatlab' },
-      onProgress,
-      taskControl
-    )
+    const sessionId = String(config.sessionId || '').trim()
+    const outputPath = String(config.outputPath || '').trim()
+    const options = config.options || { format: 'chatlab' }
+    const format = String(options.format || 'chatlab')
+    if (format === 'json' || format === 'arkme-json') {
+      result = await exportService.orchestrator.exportSessionToDetailedJson(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'excel') {
+      result = await exportService.orchestrator.exportSessionToExcel(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'txt') {
+      result = await exportService.orchestrator.exportSessionToTxt(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'markdown') {
+      result = await exportService.orchestrator.exportSessionToMarkdown(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'weclone') {
+      result = await exportService.orchestrator.exportSessionToWeCloneCsv(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'html') {
+      result = await exportService.orchestrator.exportSessionToHtml(sessionId, outputPath, options, onProgress, taskControl)
+    } else if (format === 'sql') {
+      result = await exportService.orchestrator.exportSessionToSql(sessionId, outputPath, options, onProgress, taskControl)
+    } else {
+      result = await exportService.orchestrator.exportSessionToChatLab(sessionId, outputPath, options, onProgress, taskControl)
+    }
   } else {
     result = await exportService.exportSessions(
       Array.isArray(config.sessionIds) ? config.sessionIds : [],
